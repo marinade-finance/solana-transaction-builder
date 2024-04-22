@@ -1,15 +1,16 @@
 use async_stream::stream;
 use cached::proc_macro::cached;
 use log::{error, info};
-use solana_client::{nonblocking::rpc_client::RpcClient, rpc_client::SerializableTransaction};
+use solana_client::{nonblocking::rpc_client::RpcClient};
 use solana_sdk::{
     commitment_config::CommitmentConfig, hash::Hash, transaction::VersionedTransaction,
 };
-use solana_transaction_builder::{PreparedTransaction, TransactionBuilder};
+use solana_transaction_builder::{PreparedTransaction, TransactionBuilder, SignablePreparedTransaction, SendablePreparedTransaction};
 use solana_transaction_executor::{
     PriorityFeeConfiguration, PriorityFeePolicy, TransactionExecutor,
 };
 use std::sync::Arc;
+use solana_client::rpc_client::SerializableTransaction;
 use tokio::{
     sync::{
         mpsc::{channel, Sender},
@@ -26,7 +27,7 @@ const TRANSACTIONS_IN_PARALLEL: usize = 4;
 pub struct TransactionBuilderExecutionData {
     rpc_url: String,
     priority_fee_policy: PriorityFeePolicy,
-    prepared_transaction: PreparedTransaction,
+    prepared_transaction: SendablePreparedTransaction,
     tx_uuid: String,
 }
 

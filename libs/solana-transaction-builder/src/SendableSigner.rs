@@ -3,8 +3,7 @@ use solana_sdk::signature::{Signature, SignerError};
 use solana_sdk::signer::Signer;
 use std::sync::{Arc, Mutex};
 
-pub trait SendableSignerTrait : Signer + Send + Sized {}
-
+pub trait SendableSignerTrait: Signer + Send + Sized {}
 
 #[derive(Debug)]
 pub struct SendableSigner {

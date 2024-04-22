@@ -11,16 +11,13 @@ use std::{collections::HashMap, sync::Arc};
 
 #[derive(Debug, Default, Clone)]
 pub struct SignatureBuilder {
-    pub signers: HashMap<Pubkey, SendableSigner>,
+    pub signers: HashMap<Pubkey, Arc<dyn Signer>>,
 }
 
 impl SignatureBuilder {
     pub fn add_signer(&mut self, signer: Arc<dyn Signer>) -> Pubkey {
         let pubkey = signer.pubkey();
-        let sendable_signer = SendableSigner {
-            signer: Mutex::new(signer),
-        };
-        self.signers.insert(pubkey, sendable_signer);
+        self.signers.insert(pubkey, signer);
         pubkey
     }
 
@@ -34,19 +31,11 @@ impl SignatureBuilder {
     }
 
     pub fn get_signer(&self, key: &Pubkey) -> Option<Arc<dyn Signer>> {
-        let s = self.signers.get(key)?;
-        s.signer.lock().map_or_else(
-            |e|
-                panic!("get_signer: failed to lock signer {key}: {:?}", e)
-            ,
-            |s| s.clone().into(),
-        )
+        self.signers.get(key).cloned()
     }
 
     pub fn into_signers(self) -> Vec<Arc<dyn Signer>> {
-        self.signers.into_iter().map(|(key,s)| s.signer.lock().map_or_else(|e|
-            panic!("get_signer: failed to lock signer {key}: {:?}", e), |s| s.clone().into(),
-        )).collect()
+        self.signers.into_values().collect()
     }
 
     pub fn sign_transaction(&self, transaction: &mut Transaction) -> Result<(), SignerError> {
@@ -84,13 +73,10 @@ impl SignatureBuilder {
         let signers_for_transaction = self.signers_for_transaction(transaction)?;
         Ok(signers_for_transaction
             .into_iter()
-            .map(|signer| {
-                SendableSigner {
-                    signer: Mutex::new(signer),
-                }
+            .map(|signer| SendableSigner {
+                signer: Mutex::new(signer),
             })
             .collect())
-
     }
 }
 

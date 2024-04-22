@@ -7,7 +7,7 @@ use solana_sdk::{
 };
 use std::{collections::HashMap, sync::Arc};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SignatureBuilder {
     pub signers: HashMap<Pubkey, Arc<dyn Signer>>,
 }

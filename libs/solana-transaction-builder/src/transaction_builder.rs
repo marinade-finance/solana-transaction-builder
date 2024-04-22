@@ -1,6 +1,5 @@
 use crate::prepared_transaction::PreparedTransaction;
 use crate::signature_builder::SignatureBuilder;
-use anchor_client::RequestBuilder;
 use anyhow::anyhow;
 use log::error;
 use once_cell::sync::OnceCell;
@@ -8,7 +7,6 @@ use solana_sdk::{
     instruction::Instruction, packet::PACKET_DATA_SIZE, pubkey::Pubkey, signature::Signer,
     transaction::Transaction,
 };
-use std::ops::Deref;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -20,7 +18,7 @@ pub enum TransactionBuildError {
     TooBigTransaction,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TransactionBuilder {
     fee_payer: Pubkey,
     signature_builder: SignatureBuilder, // invariant: has signers for all instructions
@@ -128,22 +126,6 @@ impl TransactionBuilder {
         }
     }
 
-    pub fn add_instructions_from_anchor_builder<C: Deref<Target = impl Signer> + Clone>(
-        &mut self,
-        request_builder: RequestBuilder<C>,
-    ) -> anyhow::Result<&mut Self> {
-        let instructions = request_builder.instructions().map_err(|e| {
-            error!(
-                "add_instructions_from_anchor_builder: error building instructions: {:?}",
-                e
-            );
-            anyhow!(e)
-        })?;
-        self.add_instructions(instructions)?;
-        self.finish_instruction_pack();
-        Ok(self)
-    }
-
     pub fn add_instructions<I>(&mut self, instructions: I) -> anyhow::Result<&mut Self>
     where
         I: IntoIterator<Item = Instruction>,
@@ -176,6 +158,8 @@ impl TransactionBuilder {
         Ok(self)
     }
 
+    /// This method removes the transactions from the returned transaction pack from the builder.
+    /// Next call returns the next pack of transactions.
     pub fn build_next(&mut self) -> Option<PreparedTransaction> {
         if !self.is_current_pack_empty() {
             self.finish_instruction_pack()
@@ -205,7 +189,9 @@ impl TransactionBuilder {
         }
     }
 
-    // Next transaction from builder that's
+    /// Next transaction from builder. It merges multiple transaction packs together (as much as fits into tx).
+    /// This method removes the transactions from the returned transaction pack from the builder.
+    /// Next call returns the next pack of transactions.
     pub fn build_next_combined(&mut self) -> Option<PreparedTransaction> {
         if !self.is_current_pack_empty() {
             self.finish_instruction_pack()

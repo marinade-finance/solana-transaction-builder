@@ -1,0 +1,16 @@
+[package]
+name = "solana-transaction-builder-executor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+cached = {  workspace = true }
+log = { workspace = true }
+solana-client = { workspace = true }
+solana-sdk = {workspace = true}
+solana-transaction-builder = { workspace = true }
+solana-transaction-executor = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }

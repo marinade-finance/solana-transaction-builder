@@ -1,0 +1,12 @@
+[package]
+name = "solana-transaction-builder-anchor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+anchor-client = { workspace = true }
+log = { workspace = true }
+solana-sdk = {workspace = true}
+solana-transaction-builder = { workspace = true }
+uuid = { workspace = true }

@@ -1,4 +1,3 @@
-use std::fmt::Debug;
 use crate::signature_builder::SignatureBuilder;
 use solana_sdk::hash::Hash;
 use solana_sdk::pubkey::Pubkey;
@@ -6,12 +5,10 @@ use solana_sdk::signer::{Signer, SignerError};
 use solana_sdk::transaction::{Transaction, VersionedTransaction};
 use std::sync::Arc;
 
-pub trait SignerWithSend: Signer + Send + Debug {}
-
 #[derive(Debug, Clone)]
 pub struct PreparedTransaction {
     pub transaction: Transaction,
-    pub signers: Vec<Arc<dyn SignerWithSend>>,
+    pub signers: Vec<Arc<dyn Signer>>,
 }
 
 impl PreparedTransaction {

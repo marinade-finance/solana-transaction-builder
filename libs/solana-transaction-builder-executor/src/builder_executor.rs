@@ -3,15 +3,13 @@ use cached::proc_macro::cached;
 use log::{error, info};
 use solana_client::{nonblocking::rpc_client::RpcClient, rpc_client::SerializableTransaction};
 use solana_sdk::{
-    commitment_config::CommitmentConfig,
-    hash::Hash,
-    transaction::VersionedTransaction,
+    commitment_config::CommitmentConfig, hash::Hash, transaction::VersionedTransaction,
 };
 use solana_transaction_builder::{PreparedTransaction, TransactionBuilder};
 use solana_transaction_executor::{
     PriorityFeeConfiguration, PriorityFeePolicy, TransactionExecutor,
 };
-use std::{ sync::Arc,};
+use std::sync::Arc;
 use tokio::{
     sync::{
         mpsc::{channel, Sender},
@@ -66,7 +64,7 @@ async fn send_async_transaction_builder_combined(
     rpc_url: String,
     tx_transaction: Sender<Vec<TransactionBuilderExecutionData>>,
     transaction_builder: &mut TransactionBuilder,
-    priority_fee_policy: Option<PriorityFeePolicy>
+    priority_fee_policy: Option<PriorityFeePolicy>,
 ) {
     let async_transaction_builders = Vec::new();
     let execution_data: Vec<TransactionBuilderExecutionData> = transaction_builder
@@ -75,9 +73,12 @@ async fn send_async_transaction_builder_combined(
             TransactionBuilderExecutionData::new(
                 prepared_transaction,
                 rpc_url.clone(),
-                priority_fee_policy.clone().map_or(PriorityFeePolicy::default(), |policy| policy),
+                priority_fee_policy
+                    .clone()
+                    .map_or(PriorityFeePolicy::default(), |policy| policy),
             )
-        }).collect();
+        })
+        .collect();
     info!(
         "Enqueuing transaction sequence: {:?}",
         execution_data
@@ -136,9 +137,7 @@ pub fn spawn_transaction_simulator(
                                 info!("Successfully simulated the transaction: {result:?}")
                             }
                             Err(err) => {
-                                error!(
-                                    "Failed to simulate the transaction: {err}"
-                                )
+                                error!("Failed to simulate the transaction: {err}")
                             }
                         };
                     }

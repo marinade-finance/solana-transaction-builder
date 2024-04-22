@@ -1,3 +1,4 @@
+use crate::SendableSigner::SendableSigner;
 use log::error;
 use solana_sdk::{
     pubkey::Pubkey,
@@ -5,25 +6,27 @@ use solana_sdk::{
     signers::Signers,
     transaction::Transaction,
 };
+use std::sync::Mutex;
 use std::{collections::HashMap, sync::Arc};
 
 #[derive(Debug, Default, Clone)]
 pub struct SignatureBuilder {
-    pub signers: HashMap<Pubkey, Arc<dyn Signer>>,
+    pub signers: HashMap<Pubkey, SendableSigner>,
 }
 
 impl SignatureBuilder {
     pub fn add_signer(&mut self, signer: Arc<dyn Signer>) -> Pubkey {
         let pubkey = signer.pubkey();
-        self.signers.insert(pubkey, signer);
+        let sendable_signer = SendableSigner {
+            signer: Mutex::new(signer),
+        };
+        self.signers.insert(pubkey, sendable_signer);
         pubkey
     }
 
     pub fn new_signer(&mut self) -> Pubkey {
         let keypair = Keypair::new();
-        let address = keypair.pubkey();
-        self.signers.insert(address, Arc::new(keypair));
-        address
+        self.add_signer(Arc::new(keypair))
     }
 
     pub fn contains_key(&self, key: &Pubkey) -> bool {
@@ -31,11 +34,19 @@ impl SignatureBuilder {
     }
 
     pub fn get_signer(&self, key: &Pubkey) -> Option<Arc<dyn Signer>> {
-        self.signers.get(key).cloned()
+        let s = self.signers.get(key)?;
+        s.signer.lock().map_or_else(
+            |e|
+                panic!("get_signer: failed to lock signer {key}: {:?}", e)
+            ,
+            |s| s.clone().into(),
+        )
     }
 
     pub fn into_signers(self) -> Vec<Arc<dyn Signer>> {
-        self.signers.into_values().collect()
+        self.signers.into_iter().map(|(key,s)| s.signer.lock().map_or_else(|e|
+            panic!("get_signer: failed to lock signer {key}: {:?}", e), |s| s.clone().into(),
+        )).collect()
     }
 
     pub fn sign_transaction(&self, transaction: &mut Transaction) -> Result<(), SignerError> {
@@ -62,8 +73,24 @@ impl SignatureBuilder {
         transaction.message().account_keys
             [0..transaction.message().header.num_required_signatures as usize]
             .iter()
-            .map(|key| self.signers.get(key).cloned().ok_or(*key))
+            .map(|key| self.get_signer(key).ok_or(*key))
             .collect()
+    }
+
+    pub fn sendable_signers_for_transaction(
+        &self,
+        transaction: &Transaction,
+    ) -> Result<Vec<SendableSigner>, Pubkey> {
+        let signers_for_transaction = self.signers_for_transaction(transaction)?;
+        Ok(signers_for_transaction
+            .into_iter()
+            .map(|signer| {
+                SendableSigner {
+                    signer: Mutex::new(signer),
+                }
+            })
+            .collect())
+
     }
 }
 

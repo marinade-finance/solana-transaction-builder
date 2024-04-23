@@ -22,6 +22,6 @@ solana-sdk = "1.17.22"
 solana-transaction-builder = { path =  "./libs/solana-transaction-builder"}
 solana-transaction-executor = { git = "https://github.com/marinade-finance/solana-transaction-executor", branch = "master"}
 thiserror = "1.0.58"
-tokio = { version = "1.37.0", features = ["full"] }
+tokio = { version = "1.34.0", features = ["full"] }
 tokio-executor-trait = "2.1.1"
-uuid = { version = "1.8.0", features = ["v4"] }
+uuid = { version = "1.4.1", features = ["v4"] }

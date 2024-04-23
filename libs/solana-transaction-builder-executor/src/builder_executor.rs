@@ -27,10 +27,10 @@ const TRANSACTIONS_IN_PARALLEL: usize = 4;
 
 #[derive(Clone)]
 pub struct TransactionBuilderExecutionData {
-    rpc_url: String,
-    priority_fee_policy: PriorityFeePolicy,
-    prepared_transaction: SendablePreparedTransaction,
-    tx_uuid: String,
+    pub rpc_url: String,
+    pub priority_fee_policy: PriorityFeePolicy,
+    pub prepared_transaction: SendablePreparedTransaction,
+    pub tx_uuid: String,
 }
 
 impl TransactionBuilderExecutionData {
@@ -61,6 +61,25 @@ impl TransactionBuilderExecutionData {
         );
         Ok(transaction)
     }
+}
+
+pub fn sip_up_builder_to_execution_data(
+    rpc_url: String,
+    transaction_builder: &mut TransactionBuilder,
+    priority_fee_policy: Option<PriorityFeePolicy>,
+) -> Vec<TransactionBuilderExecutionData> {
+    transaction_builder
+        .sequence_combined()
+        .map(|prepared_transaction| {
+            TransactionBuilderExecutionData::new(
+                prepared_transaction.into_sendable(),
+                rpc_url.clone(),
+                priority_fee_policy
+                    .clone()
+                    .map_or(PriorityFeePolicy::default(), |policy| policy),
+            )
+        })
+        .collect()
 }
 
 pub async fn send_async_transaction_builder_combined(

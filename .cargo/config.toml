@@ -1,0 +1,5 @@
+[fmt]
+args = ["--all"]
+
+[alias]
+"clippy:fix" = ["clippy", "--fix", "--all", "--allow-staged", "--allow-dirty"]

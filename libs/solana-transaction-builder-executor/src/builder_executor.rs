@@ -1,6 +1,6 @@
 use async_stream::stream;
 use cached::proc_macro::cached;
-use log::{error, info};
+use log::info;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_client::SerializableTransaction;
 use solana_sdk::{
@@ -11,7 +11,6 @@ use solana_transaction_executor::{
     PriorityFeeConfiguration, PriorityFeePolicy, TransactionExecutor,
 };
 use std::sync::Arc;
-use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -61,47 +60,6 @@ async fn get_latest_blockhash(url: String) -> anyhow::Result<Hash> {
     Ok(blockhash)
 }
 
-pub async fn send_async_transaction_builder_combined(
-    rpc_url: String,
-    sender: Sender<Vec<TransactionBuilderExecutionData>>,
-    transaction_builder: &mut TransactionBuilder,
-    priority_fee_policy: Option<PriorityFeePolicy>,
-) {
-    let execution_data =
-        sip_up_builder_to_execution_data(rpc_url, transaction_builder, priority_fee_policy);
-    info!(
-        "Enqueuing transaction sequence: {:?}",
-        execution_data
-            .iter()
-            .map(|builder| &builder.tx_uuid)
-            .collect::<Vec<_>>()
-    );
-    if let Err(err) = sender.send(execution_data).await {
-        error!(
-            "Failed to pass the sequence of async transaction builders through the channel: {err}"
-        );
-    }
-}
-
-fn sip_up_builder_to_execution_data(
-    rpc_url: String,
-    transaction_builder: &mut TransactionBuilder,
-    priority_fee_policy: Option<PriorityFeePolicy>,
-) -> Vec<TransactionBuilderExecutionData> {
-    transaction_builder
-        .sequence_combined()
-        .map(|prepared_transaction| {
-            TransactionBuilderExecutionData::new(
-                prepared_transaction,
-                rpc_url.clone(),
-                priority_fee_policy
-                    .clone()
-                    .map_or(PriorityFeePolicy::default(), |policy| policy),
-            )
-        })
-        .collect()
-}
-
 pub async fn execute_transactions_in_sequence(
     transaction_executor: Arc<TransactionExecutor>,
     async_transaction_builders: Vec<TransactionBuilderExecutionData>,
@@ -132,4 +90,23 @@ pub async fn execute_transactions_in_sequence(
     }
 
     Ok(())
+}
+
+pub fn builder_to_execution_data(
+    rpc_url: String,
+    transaction_builder: &mut TransactionBuilder,
+    priority_fee_policy: Option<PriorityFeePolicy>,
+) -> Vec<TransactionBuilderExecutionData> {
+    transaction_builder
+        .sequence_combined()
+        .map(|prepared_transaction| {
+            TransactionBuilderExecutionData::new(
+                prepared_transaction,
+                rpc_url.clone(),
+                priority_fee_policy
+                    .clone()
+                    .map_or(PriorityFeePolicy::default(), |policy| policy),
+            )
+        })
+        .collect()
 }

@@ -13,7 +13,7 @@ pub trait SignedTransaction {
         recent_blockhash: Hash,
     ) -> Result<VersionedTransaction, SignerError> {
         let transaction = self.signed_transaction(recent_blockhash)?;
-        Ok(VersionedTransaction::from(transaction.clone()))
+        Ok(VersionedTransaction::from(transaction))
     }
 }
 

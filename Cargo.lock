@@ -3884,6 +3884,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "cached",
+ "futures",
  "log",
  "solana-client",
  "solana-sdk",

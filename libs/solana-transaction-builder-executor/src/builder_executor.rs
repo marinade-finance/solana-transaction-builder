@@ -1,6 +1,7 @@
+use anyhow::anyhow;
 use async_stream::stream;
 use cached::proc_macro::cached;
-use log::info;
+use log::{error, info};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_client::SerializableTransaction;
 use solana_sdk::{
@@ -11,7 +12,10 @@ use solana_transaction_executor::{
     PriorityFeeConfiguration, PriorityFeePolicy, TransactionExecutor,
 };
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
+
+const PARRALLEL_EXECUTION_LIMIT: usize = 30;
 
 #[derive(Clone)]
 pub struct TransactionBuilderExecutionData {
@@ -87,6 +91,68 @@ pub async fn execute_transactions_in_sequence(
                 anyhow::bail!("Failed to execute the transaction {tx_uuid} {human_index}/{sequence_length}, err: {err}");
             }
         };
+    }
+
+    Ok(())
+}
+
+pub async fn execute_transactions_in_parallel(
+    transaction_executor: Arc<TransactionExecutor>,
+    async_transaction_builders: Vec<TransactionBuilderExecutionData>,
+) -> anyhow::Result<()> {
+    let sequence_length = async_transaction_builders.len();
+
+    let semaphore = Arc::new(Semaphore::new(PARRALLEL_EXECUTION_LIMIT));
+
+    // Prepare the list of futures with their associated tx_uuid and human_index
+    let futures = async_transaction_builders
+        .into_iter()
+        .enumerate()
+        .map(|(index, async_transaction_builder)| {
+            let human_index = index + 1;
+            let tx_uuid = async_transaction_builder.tx_uuid.clone();
+            info!("Building the transaction {human_index}/{sequence_length}: {tx_uuid}");
+            let semaphore = Arc::clone(&semaphore);
+            let transaction_executor = Arc::clone(&transaction_executor);
+            let transaction_future = async move {
+                let _permit = semaphore.acquire().await.expect("Failed to acquire semaphore");
+                let transaction_result = stream! {
+                    for priority_fee_configuration in async_transaction_builder.priority_fee_policy.iter_priority_fee_configuration() {
+                        yield async_transaction_builder.build(priority_fee_configuration).await;
+                    }
+                };
+                transaction_executor.execute_transaction(transaction_result).await
+            };
+            // Return a tuple of tx_uuid, human_index, and the future
+            (tx_uuid, human_index, transaction_future)
+        })
+        .collect::<Vec<_>>();
+
+    // Await completion of all futures using join_all
+    let results = futures::future::join_all(futures.into_iter().map(
+        |(tx_uuid, human_index, future)| async move {
+            let result = future.await;
+            (tx_uuid, human_index, result)
+        },
+    ))
+    .await;
+
+    let mut errors = Vec::new();
+    for (tx_uuid, human_index, result) in results {
+        match result {
+            Ok(sig) => {
+                info!("Transaction {sig} ({human_index}/({tx_uuid}) executed successfully.");
+            }
+            Err(err) => {
+                let error_msg = format!("Transaction {human_index}/{tx_uuid} failed: {:?}", err);
+                error!("{}", error_msg);
+                errors.push(error_msg);
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        return Err(anyhow!(errors.join("\n")));
     }
 
     Ok(())

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
-const PARRALLEL_EXECUTION_LIMIT: usize = 30;
+const PARALLEL_EXECUTION_LIMIT: usize = 30;
 
 #[derive(Clone)]
 pub struct TransactionBuilderExecutionData {
@@ -66,10 +66,10 @@ async fn get_latest_blockhash(url: String) -> anyhow::Result<Hash> {
 
 pub async fn execute_transactions_in_sequence(
     transaction_executor: Arc<TransactionExecutor>,
-    async_transaction_builders: Vec<TransactionBuilderExecutionData>,
+    execution_data: Vec<TransactionBuilderExecutionData>,
 ) -> anyhow::Result<()> {
-    let sequence_length = async_transaction_builders.len();
-    for (index, async_transaction_builder) in async_transaction_builders.into_iter().enumerate() {
+    let sequence_length = execution_data.len();
+    for (index, async_transaction_builder) in execution_data.into_iter().enumerate() {
         let human_index = index + 1;
         let tx_uuid = &async_transaction_builder.tx_uuid;
         debug!("Building the transaction {human_index}/{tx_uuid} (size: {sequence_length})");
@@ -98,16 +98,16 @@ pub async fn execute_transactions_in_sequence(
 
 pub async fn execute_transactions_in_parallel(
     transaction_executor: Arc<TransactionExecutor>,
-    async_transaction_builders: Vec<TransactionBuilderExecutionData>,
+    execution_data: Vec<TransactionBuilderExecutionData>,
     parallel_execution_limit: Option<usize>,
 ) -> anyhow::Result<()> {
-    let sequence_length = async_transaction_builders.len();
+    let sequence_length = execution_data.len();
 
-    let parallel_execution_limit = parallel_execution_limit.unwrap_or(PARRALLEL_EXECUTION_LIMIT);
+    let parallel_execution_limit = parallel_execution_limit.unwrap_or(PARALLEL_EXECUTION_LIMIT);
     let semaphore = Arc::new(Semaphore::new(parallel_execution_limit));
 
     // Prepare the list of futures with their associated tx_uuid and human_index
-    let futures = async_transaction_builders
+    let futures = execution_data
         .into_iter()
         .enumerate()
         .map(|(index, async_transaction_builder)| {
@@ -168,13 +168,26 @@ pub fn builder_to_execution_data(
     transaction_builder
         .sequence_combined()
         .map(|prepared_transaction| {
-            TransactionBuilderExecutionData::new(
+            let execution_data = TransactionBuilderExecutionData::new(
                 prepared_transaction,
                 rpc_url.clone(),
                 priority_fee_policy
                     .clone()
                     .map_or(PriorityFeePolicy::default(), |policy| policy),
-            )
+            );
+
+            if log::log_enabled!(log::Level::Debug) {
+                let description = execution_data
+                    .prepared_transaction
+                    .single_description()
+                    .map_or_else(|| "".to_string(), |v| format!(", description: {}", v));
+                debug!(
+                    "Prepared transaction {}{}",
+                    execution_data.tx_uuid, description
+                );
+            }
+
+            execution_data
         })
         .collect()
 }

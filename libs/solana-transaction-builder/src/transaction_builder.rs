@@ -23,8 +23,9 @@ pub enum TransactionBuildError {
 pub struct TransactionBuilder {
     fee_payer: Pubkey,
     signature_builder: SignatureBuilder, // invariant: has signers for all instructions
-    instruction_packs: Vec<Vec<Instruction>>,
-    current_instruction_pack: OnceCell<Vec<Instruction>>,
+    // instruction pack contains a list of instruction with optional description to them
+    instruction_packs: Vec<Vec<(Instruction, Option<String>)>>,
+    current_instruction_pack: OnceCell<Vec<(Instruction, Option<String>)>>,
     max_transaction_size: usize,
 }
 
@@ -137,13 +138,44 @@ impl TransactionBuilder {
         Ok(self)
     }
 
+    pub fn add_instructions_with_description<I>(
+        &mut self,
+        instructions_with_description: I,
+    ) -> anyhow::Result<&mut Self>
+    where
+        I: IntoIterator<Item = (Instruction, String)>,
+    {
+        for (instruction, description) in instructions_with_description {
+            self.add_instruction_with_description(instruction, description)?;
+        }
+        Ok(self)
+    }
+
     pub fn add_instruction(&mut self, instruction: Instruction) -> anyhow::Result<&mut Self> {
+        self.add_instruction_internal(instruction, None)
+    }
+
+    pub fn add_instruction_with_description(
+        &mut self,
+        instruction: Instruction,
+        description: String,
+    ) -> anyhow::Result<&mut Self> {
+        self.add_instruction_internal(instruction, Some(description))
+    }
+
+    fn add_instruction_internal(
+        &mut self,
+        instruction: Instruction,
+        description: Option<String>,
+    ) -> anyhow::Result<&mut Self> {
         self.check_signers(&instruction)?;
         let current = self.current_instruction_pack.get_mut().unwrap();
 
-        current.push(instruction);
-        let transaction_candidate =
-            Transaction::new_with_payer(&current.to_vec(), Some(&self.fee_payer));
+        current.push((instruction, description));
+        let transaction_candidate = Transaction::new_with_payer(
+            &current.iter().cloned().unzip::<_, _, Vec<_>, Vec<_>>().0,
+            Some(&self.fee_payer),
+        );
         let tx_size_candidate = bincode::serialize(&transaction_candidate).unwrap().len();
         if self.max_transaction_size > 0 && tx_size_candidate > self.max_transaction_size {
             // Transaction is too big to add new instruction, remove the last one
@@ -169,11 +201,11 @@ impl TransactionBuilder {
             return None;
         }
         if !self.instruction_packs.is_empty() {
-            let instructions: Vec<Instruction> =
-                self.instruction_packs.remove(0).into_iter().collect();
+            let (instructions, descriptions): (Vec<Instruction>, Vec<Option<String>>) =
+                self.instruction_packs.remove(0).into_iter().unzip();
             let transaction = Transaction::new_with_payer(&instructions, Some(&self.fee_payer));
             Some(
-                PreparedTransaction::new(transaction, &self.signature_builder)
+                PreparedTransaction::new(transaction, &self.signature_builder, descriptions)
                     .expect("Signature keys must be checked when instruction added"),
             )
         } else {
@@ -201,19 +233,26 @@ impl TransactionBuilder {
             return None;
         }
 
-        let transaction = if self.max_transaction_size == 0 {
-            let instructions: Vec<Instruction> =
-                self.instruction_packs.drain(..).flatten().collect();
-            Transaction::new_with_payer(&instructions, Some(&self.fee_payer))
+        let (transaction, descriptions) = if self.max_transaction_size == 0 {
+            let (instructions, descriptions): (Vec<Instruction>, Vec<Option<String>>) =
+                self.instruction_packs.drain(..).flatten().unzip();
+            (
+                Transaction::new_with_payer(&instructions, Some(&self.fee_payer)),
+                descriptions,
+            )
         } else {
             // One pack must fit transaction anyway
-            let mut instructions: Vec<Instruction> =
-                self.instruction_packs.remove(0).into_iter().collect();
+            let (mut instructions, mut descriptions): (Vec<Instruction>, Vec<Option<String>>) =
+                self.instruction_packs.remove(0).into_iter().unzip();
             let mut transaction = Transaction::new_with_payer(&instructions, Some(&self.fee_payer));
             while let Some(next_pack) = self.instruction_packs.first() {
-                let next_instructions: Vec<Instruction> = next_pack.to_vec();
+                let (next_instructions, next_descriptions): (
+                    Vec<Instruction>,
+                    Vec<Option<String>>,
+                ) = next_pack.iter().cloned().unzip();
                 // Try to add next pack
                 instructions.extend(next_instructions.into_iter());
+                descriptions.extend(next_descriptions.into_iter());
                 let transaction_candidate =
                     Transaction::new_with_payer(&instructions, Some(&self.fee_payer));
 
@@ -229,10 +268,10 @@ impl TransactionBuilder {
                     break;
                 }
             }
-            transaction
+            (transaction, descriptions)
         };
         Some(
-            PreparedTransaction::new(transaction, &self.signature_builder)
+            PreparedTransaction::new(transaction, &self.signature_builder, descriptions)
                 .expect("Signature keys must be checked when instruction added"),
         )
     }
@@ -261,10 +300,15 @@ impl TransactionBuilder {
     }
 
     pub fn instructions(&self) -> Vec<Instruction> {
-        let mut instructions: Vec<Instruction> =
-            self.instruction_packs.iter().flatten().cloned().collect();
+        let (mut instructions, _): (Vec<Instruction>, Vec<_>) =
+            self.instruction_packs.iter().flatten().cloned().unzip();
         if let Some(current_instructions) = self.current_instruction_pack.get() {
-            instructions.extend(current_instructions.iter().cloned())
+            instructions.extend(
+                current_instructions
+                    .iter()
+                    .map(|(instr, _)| instr.clone())
+                    .collect::<Vec<Instruction>>(),
+            )
         }
         instructions
     }

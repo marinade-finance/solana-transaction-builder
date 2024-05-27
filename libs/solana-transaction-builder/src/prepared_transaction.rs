@@ -4,7 +4,7 @@ use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Keypair;
 use solana_sdk::signer::SignerError;
 use solana_sdk::transaction::{Transaction, VersionedTransaction};
-use std::rc::Rc;
+use std::sync::Arc;
 
 pub trait SignedTransaction {
     fn signed_transaction(&self, recent_blockhash: Hash) -> Result<Transaction, SignerError>;
@@ -20,7 +20,7 @@ pub trait SignedTransaction {
 #[derive(Debug, Clone)]
 pub struct PreparedTransaction {
     pub transaction: Transaction,
-    pub signers: Vec<Rc<Keypair>>,
+    pub signers: Vec<Arc<Keypair>>,
     pub instruction_descriptions: Vec<Option<String>>,
 }
 
@@ -54,11 +54,7 @@ impl PreparedTransaction {
     }
 
     pub fn single_description(&self) -> Option<String> {
-        let mut descriptions = self
-            .instruction_descriptions
-            .iter()
-            .map(|desc| desc.clone())
-            .collect::<Vec<_>>();
+        let mut descriptions = self.instruction_descriptions.to_vec();
         for (i, description) in descriptions.iter_mut().enumerate() {
             if let Some(desc) = description {
                 *description = Some(format!("#{}: {}", i, desc));
@@ -66,7 +62,7 @@ impl PreparedTransaction {
         }
         let descriptions = descriptions
             .into_iter()
-            .filter_map(|d| d.map_or_else(|| None, |d| Some(d)))
+            .filter_map(|d| d.map_or_else(|| None, Some))
             .collect::<Vec<String>>()
             .join("\n");
         if descriptions.is_empty() {

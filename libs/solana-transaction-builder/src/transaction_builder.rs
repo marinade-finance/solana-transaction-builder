@@ -4,11 +4,12 @@ use anyhow::anyhow;
 use log::error;
 use once_cell::sync::OnceCell;
 use solana_sdk::signature::Keypair;
+use solana_sdk::signers::Signers;
 use solana_sdk::{
     instruction::Instruction, packet::PACKET_DATA_SIZE, pubkey::Pubkey, signature::Signer,
     transaction::Transaction,
 };
-use std::rc::Rc;
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Error)]
@@ -30,7 +31,7 @@ pub struct TransactionBuilder {
 }
 
 impl TransactionBuilder {
-    pub fn new(fee_payer: Rc<Keypair>, max_transaction_size: usize) -> Self {
+    pub fn new(fee_payer: Arc<Keypair>, max_transaction_size: usize) -> Self {
         let mut signature_builder = SignatureBuilder::default();
         let builder = Self {
             fee_payer: signature_builder.add_signer(fee_payer),
@@ -47,25 +48,25 @@ impl TransactionBuilder {
         self.fee_payer
     }
 
-    pub fn get_signer(&self, key: &Pubkey) -> Option<Rc<Keypair>> {
+    pub fn get_signer(&self, key: &Pubkey) -> Option<Arc<Keypair>> {
         self.signature_builder.get_signer(key)
     }
 
-    pub fn fee_payer_signer(&self) -> Rc<Keypair> {
+    pub fn fee_payer_signer(&self) -> Arc<Keypair> {
         self.get_signer(&self.fee_payer()).unwrap()
     }
 
     ///constructor, limit size to a single transaction
-    pub fn limited(fee_payer: Rc<Keypair>) -> Self {
+    pub fn limited(fee_payer: Arc<Keypair>) -> Self {
         Self::new(fee_payer, PACKET_DATA_SIZE)
     }
 
     ///constructor, no size limit, can be split in many marinade-transactions
-    pub fn unlimited(fee_payer: Rc<Keypair>) -> Self {
+    pub fn unlimited(fee_payer: Arc<Keypair>) -> Self {
         Self::new(fee_payer, 0)
     }
 
-    pub fn add_signer(&mut self, signer: Rc<Keypair>) -> Pubkey {
+    pub fn add_signer(&mut self, signer: Arc<Keypair>) -> Pubkey {
         self.signature_builder.add_signer(signer)
     }
 
@@ -73,7 +74,7 @@ impl TransactionBuilder {
         self.signature_builder.new_signer()
     }
 
-    pub fn add_signer_checked(&mut self, signer: &Rc<Keypair>) {
+    pub fn add_signer_checked(&mut self, signer: &Arc<Keypair>) {
         if !self.signature_builder.contains_key(&signer.pubkey()) {
             self.add_signer(signer.clone());
         }
@@ -85,10 +86,7 @@ impl TransactionBuilder {
                 error!(
                     "Unknown signer {} in signature builder {:?}, instruction accounts: {:?}",
                     account.pubkey,
-                    self.signature_builder
-                        .signers
-                        .keys()
-                        .collect::<Vec<&Pubkey>>(),
+                    self.signature_builder.pubkeys(),
                     instruction.accounts
                 );
                 return Err(TransactionBuildError::UnknownSigner(account.pubkey));
@@ -346,16 +344,16 @@ mod tests {
 
     #[test]
     fn test_add_signer() {
-        let signer1 = Rc::new(Keypair::new());
-        let signer2 = Rc::new(Keypair::new());
-        let mut tx_builder = TransactionBuilder::limited(Rc::new(Keypair::new()));
+        let signer1 = Arc::new(Keypair::new());
+        let signer2 = Arc::new(Keypair::new());
+        let mut tx_builder = TransactionBuilder::limited(Arc::new(Keypair::new()));
         tx_builder.add_signer_checked(&signer1);
         tx_builder.add_signer_checked(&signer2);
         tx_builder.add_signer_checked(&signer1);
-        assert_eq!(tx_builder.signature_builder.signers.len(), 3); // fee payer + 2 signers
+        assert_eq!(tx_builder.signature_builder.signers().len(), 3); // fee payer + 2 signers
 
         tx_builder.add_signer(signer1.clone());
-        assert_eq!(tx_builder.signature_builder.signers.len(), 3);
+        assert_eq!(tx_builder.signature_builder.signers().len(), 3);
 
         let ix = Instruction {
             program_id: Pubkey::default(),
@@ -379,5 +377,18 @@ mod tests {
             data: vec![],
         };
         assert!(tx_builder.check_signers(&ix).is_ok());
+    }
+
+    #[test]
+    fn is_sync_send_able() {
+        fn do_stuff<T: Sync + Send>(_t: T) {}
+
+        let keypair = Arc::new(Keypair::new());
+        let tx_builder = TransactionBuilder::limited(keypair.clone());
+
+        assert_eq!(tx_builder.signature_builder.signers().len(), 1_usize);
+        assert!(tx_builder.signature_builder.contains_key(&keypair.pubkey()));
+
+        do_stuff(tx_builder.signature_builder);
     }
 }

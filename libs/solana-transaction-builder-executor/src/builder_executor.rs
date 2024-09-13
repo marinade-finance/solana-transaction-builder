@@ -67,8 +67,11 @@ async fn get_latest_blockhash(url: String) -> anyhow::Result<Hash> {
 pub async fn execute_transactions_in_sequence(
     transaction_executor: Arc<TransactionExecutor>,
     execution_data: Vec<TransactionBuilderExecutionData>,
+    fail_on_first_error: bool,
 ) -> anyhow::Result<()> {
     let sequence_length = execution_data.len();
+    let mut errors: Vec<String> = Vec::new();
+
     for (index, async_transaction_builder) in execution_data.into_iter().enumerate() {
         let human_index = index + 1;
         let tx_uuid = &async_transaction_builder.tx_uuid;
@@ -88,9 +91,19 @@ pub async fn execute_transactions_in_sequence(
                 info!("Transaction {sig} {human_index}/{tx_uuid} executed successfully");
             }
             Err(err) => {
-                anyhow::bail!("Transaction {human_index}/{tx_uuid} failed: {:?}", err);
+                let error_msg = format!("Transaction {human_index}/{tx_uuid} failed: {:?}", err);
+                if fail_on_first_error {
+                    return Err(anyhow!(error_msg));
+                } else {
+                    error!("{}", error_msg);
+                    errors.push(error_msg);
+                }
             }
         };
+    }
+
+    if !errors.is_empty() {
+        return Err(anyhow!(errors.join("\n")));
     }
 
     Ok(())

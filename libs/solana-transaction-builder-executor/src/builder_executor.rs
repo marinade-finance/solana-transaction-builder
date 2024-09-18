@@ -7,7 +7,9 @@ use solana_client::rpc_client::SerializableTransaction;
 use solana_sdk::{
     commitment_config::CommitmentConfig, hash::Hash, transaction::VersionedTransaction,
 };
-use solana_transaction_builder::{PreparedTransaction, SignedTransaction, TransactionBuilder};
+use solana_transaction_builder::{
+    get_prepared_transaction_iterator, PreparedTransaction, SignedTransaction, TransactionBuilder,
+};
 use solana_transaction_executor::{
     PriorityFeeConfiguration, PriorityFeePolicy, TransactionExecutor,
 };
@@ -111,11 +113,9 @@ pub async fn execute_transactions_in_sequence(
 
 pub async fn execute_transactions_in_parallel(
     transaction_executor: Arc<TransactionExecutor>,
-    execution_data: Vec<TransactionBuilderExecutionData>,
+    execution_data: &mut dyn Iterator<Item = TransactionBuilderExecutionData>,
     parallel_execution_limit: Option<usize>,
 ) -> anyhow::Result<()> {
-    let sequence_length = execution_data.len();
-
     let parallel_execution_limit = parallel_execution_limit.unwrap_or(PARALLEL_EXECUTION_LIMIT);
     let semaphore = Arc::new(Semaphore::new(parallel_execution_limit));
 
@@ -127,7 +127,7 @@ pub async fn execute_transactions_in_parallel(
             let human_index = index + 1;
             let tx_uuid = async_transaction_builder.tx_uuid.clone();
             let semaphore = Arc::clone(&semaphore);
-            debug!("Building the transaction {human_index}/{tx_uuid} (size: {sequence_length})");
+            debug!("Building the transaction {human_index}/{tx_uuid}");
             let transaction_executor = Arc::clone(&transaction_executor);
             let transaction_future = async move {
                 let _permit = semaphore.acquire().await.expect("Failed to acquire semaphore");
@@ -142,6 +142,10 @@ pub async fn execute_transactions_in_parallel(
             (tx_uuid, human_index, transaction_future)
         })
         .collect::<Vec<_>>();
+    debug!(
+        "Prepared {} transactions for parallel execution",
+        futures.len()
+    );
 
     // Await completion of all futures using join_all
     let results = futures::future::join_all(futures.into_iter().map(
@@ -177,9 +181,11 @@ pub fn builder_to_execution_data(
     rpc_url: String,
     transaction_builder: &mut TransactionBuilder,
     priority_fee_policy: Option<PriorityFeePolicy>,
+    is_one_by_one: bool,
 ) -> Vec<TransactionBuilderExecutionData> {
-    transaction_builder
-        .sequence_combined()
+    let transaction_builder_iterator =
+        get_prepared_transaction_iterator(transaction_builder, is_one_by_one);
+    transaction_builder_iterator
         .map(|prepared_transaction| {
             let execution_data = TransactionBuilderExecutionData::new(
                 prepared_transaction,

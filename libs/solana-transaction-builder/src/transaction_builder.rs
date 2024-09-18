@@ -174,12 +174,12 @@ impl TransactionBuilder {
             &current.iter().cloned().unzip::<_, _, Vec<_>, Vec<_>>().0,
             Some(&self.fee_payer),
         );
-        let tx_size_candidate = bincode::serialize(&transaction_candidate).unwrap().len();
+        let tx_size_candidate = bincode::serialize(&transaction_candidate)?.len();
         if self.max_transaction_size > 0 && tx_size_candidate > self.max_transaction_size {
             // Transaction is too big to add new instruction, remove the last one
             current.pop();
-            let transaction_current = bincode::serialize(&transaction_candidate).unwrap().len();
-            let tx_size_current = bincode::serialize(&transaction_current).unwrap().len();
+            let transaction_current = bincode::serialize(&transaction_candidate)?.len();
+            let tx_size_current = bincode::serialize(&transaction_current)?.len();
             error!(
                 "add_instruction: too big transaction, tx size with added transaction: {}, original tx size: {},  max size: {}",
                 tx_size_candidate,  tx_size_current, self.max_transaction_size);
@@ -333,6 +333,18 @@ impl<'a> Iterator for CombinedSequence<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.builder.build_next_combined()
+    }
+}
+
+// Function that returns a boxed iterator over `PreparedTransaction`
+pub fn get_prepared_transaction_iterator<'a>(
+    builder: &'a mut TransactionBuilder,
+    is_one_by_one: bool,
+) -> Box<dyn Iterator<Item = PreparedTransaction> + 'a> {
+    if is_one_by_one {
+        Box::new(CombinedSequence { builder })
+    } else {
+        Box::new(Sequence { builder })
     }
 }
 

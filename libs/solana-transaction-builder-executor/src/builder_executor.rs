@@ -1,7 +1,7 @@
-use anyhow::anyhow;
+use crate::TransactionBuilderExecutionErrors;
 use async_stream::stream;
 use cached::proc_macro::cached;
-use log::{debug, error, info};
+use log::debug;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_client::SerializableTransaction;
 use solana_sdk::{
@@ -49,7 +49,7 @@ impl TransactionBuilderExecutionData {
         let transaction = self
             .prepared_transaction
             .signed_versioned_transaction(latest_blockhash)?;
-        info!(
+        debug!(
             "Built transaction {} with blockhash {latest_blockhash} and prio fee config {priority_fee_configuration:?}",
             transaction.get_signature()
         );
@@ -62,17 +62,17 @@ async fn get_latest_blockhash(url: String) -> anyhow::Result<Hash> {
     let blockhash = RpcClient::new_with_commitment(url, CommitmentConfig::finalized())
         .get_latest_blockhash()
         .await?;
-    info!("Fetched a new blockhash: {blockhash}");
+    debug!("Fetched a new blockhash: {blockhash}");
     Ok(blockhash)
 }
 
-pub async fn execute_transactions_in_sequence(
+pub async fn execute_transaction_data_in_sequence(
     transaction_executor: Arc<TransactionExecutor>,
-    execution_data: Vec<TransactionBuilderExecutionData>,
+    execution_data: &[TransactionBuilderExecutionData],
     fail_on_first_error: bool,
-) -> anyhow::Result<()> {
+) -> Result<(), TransactionBuilderExecutionErrors> {
     let sequence_length = execution_data.len();
-    let mut errors: Vec<String> = Vec::new();
+    let mut errors = TransactionBuilderExecutionErrors::new();
 
     for (index, async_transaction_builder) in execution_data.into_iter().enumerate() {
         let human_index = index + 1;
@@ -90,32 +90,37 @@ pub async fn execute_transactions_in_sequence(
             .await
         {
             Ok(sig) => {
-                info!("Transaction {sig} {human_index}/{tx_uuid} executed successfully");
+                debug!("Transaction {sig} {human_index}/{tx_uuid} executed in sequence successfully");
             }
             Err(err) => {
-                let error_msg = format!("Transaction {human_index}/{tx_uuid} failed: {:?}", err);
+                let error_description = format!("Transaction {human_index}/{tx_uuid} sequential execution failed: {:?}", err);
+                debug!("{}", error_description);
+                errors.add_error(
+                    err,
+                    error_description,
+                    human_index,
+                    tx_uuid.clone(),
+                );
                 if fail_on_first_error {
-                    return Err(anyhow!(error_msg));
-                } else {
-                    error!("{}", error_msg);
-                    errors.push(error_msg);
+                    return Err(errors);
                 }
             }
         };
     }
 
     if !errors.is_empty() {
-        return Err(anyhow!(errors.join("\n")));
+        return Err(errors);
     }
 
     Ok(())
 }
 
-pub async fn execute_transactions_in_parallel(
+pub async fn execute_transaction_data_in_parallel(
     transaction_executor: Arc<TransactionExecutor>,
-    execution_data: &mut dyn Iterator<Item = TransactionBuilderExecutionData>,
+    execution_data: &[TransactionBuilderExecutionData],
     parallel_execution_limit: Option<usize>,
-) -> anyhow::Result<()> {
+) -> Result<(), TransactionBuilderExecutionErrors> {
+    let sequence_length = execution_data.len();
     let parallel_execution_limit = parallel_execution_limit.unwrap_or(PARALLEL_EXECUTION_LIMIT);
     let semaphore = Arc::new(Semaphore::new(parallel_execution_limit));
 
@@ -127,7 +132,7 @@ pub async fn execute_transactions_in_parallel(
             let human_index = index + 1;
             let tx_uuid = async_transaction_builder.tx_uuid.clone();
             let semaphore = Arc::clone(&semaphore);
-            debug!("Building the transaction {human_index}/{tx_uuid}");
+            debug!("Building the transaction {human_index}/{tx_uuid} (size: {sequence_length})");
             let transaction_executor = Arc::clone(&transaction_executor);
             let transaction_future = async move {
                 let _permit = semaphore.acquire().await.expect("Failed to acquire semaphore");
@@ -142,10 +147,6 @@ pub async fn execute_transactions_in_parallel(
             (tx_uuid, human_index, transaction_future)
         })
         .collect::<Vec<_>>();
-    debug!(
-        "Prepared {} transactions for parallel execution",
-        futures.len()
-    );
 
     // Await completion of all futures using join_all
     let results = futures::future::join_all(futures.into_iter().map(
@@ -156,22 +157,25 @@ pub async fn execute_transactions_in_parallel(
     ))
     .await;
 
-    let mut errors = Vec::new();
+    let mut errors = TransactionBuilderExecutionErrors::new();
     for (tx_uuid, human_index, result) in results {
         match result {
             Ok(sig) => {
-                info!("Transaction {sig} {human_index}/{tx_uuid} executed successfully");
+                debug!(
+                    "Transaction {sig} {human_index}/{tx_uuid} executed in parallel successfully"
+                );
             }
             Err(err) => {
-                let error_msg = format!("Transaction {human_index}/{tx_uuid} failed: {:?}", err);
-                error!("{}", error_msg);
-                errors.push(error_msg);
+                let error_description =
+                    format!("Transaction {human_index}/{tx_uuid} failed: {:?}", err);
+                debug!("{}", error_description);
+                errors.add_error(err, error_description, human_index, tx_uuid);
             }
         }
     }
 
     if !errors.is_empty() {
-        return Err(anyhow!(errors.join("\n")));
+        return Err(errors);
     }
 
     Ok(())

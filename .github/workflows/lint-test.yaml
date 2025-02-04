@@ -13,7 +13,9 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - name: Install libudev
-        run: sudo apt-get install -y libudev-dev pkg-config
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev pkg-config
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: 1.75.0

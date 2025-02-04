@@ -528,12 +528,12 @@ dependencies = [
 
 [[package]]
 name = "borsh"
-version = "0.10.3"
+version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4114279215a005bc675e386011e594e1d9b800918cea18fcadadcce864a2046b"
+checksum = "115e54d64eb62cdebad391c19efc9dce4981c690c85a33a12199d99bb9546fee"
 dependencies = [
  "borsh-derive 0.10.3",
- "hashbrown 0.12.3",
+ "hashbrown 0.11.2",
 ]
 
 [[package]]
@@ -1589,9 +1589,6 @@ name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
-dependencies = [
- "ahash 0.7.8",
-]
 
 [[package]]
 name = "hashbrown"
@@ -3509,7 +3506,7 @@ dependencies = [
  "bincode",
  "bitflags 2.5.0",
  "blake3",
- "borsh 0.10.3",
+ "borsh 0.10.4",
  "borsh 0.9.3",
  "borsh 1.4.0",
  "bs58",
@@ -3873,7 +3870,7 @@ dependencies = [
  "anyhow",
  "base64 0.13.1",
  "bincode",
- "borsh 0.10.3",
+ "borsh 0.9.3",
  "log",
  "once_cell",
  "solana-sdk",
@@ -3928,7 +3925,7 @@ dependencies = [
  "Inflector",
  "base64 0.21.7",
  "bincode",
- "borsh 0.10.3",
+ "borsh 0.10.4",
  "bs58",
  "lazy_static",
  "log",
@@ -4074,7 +4071,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "992d9c64c2564cc8f63a4b508bf3ebcdf2254b0429b13cd1d31adb6162432a5f"
 dependencies = [
  "assert_matches",
- "borsh 0.10.3",
+ "borsh 0.10.4",
  "num-derive 0.4.2",
  "num-traits",
  "solana-program",
@@ -4133,7 +4130,7 @@ version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85a5db7e4efb1107b0b8e52a13f035437cdcb36ef99c58f6d467f089d9b2915a"
 dependencies = [
- "borsh 0.10.3",
+ "borsh 0.10.4",
  "bytemuck",
  "solana-program",
  "solana-zk-token-sdk",
@@ -4237,7 +4234,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c16ce3ba6979645fb7627aa1e435576172dd63088dc7848cb09aa331fa1fe4f"
 dependencies = [
- "borsh 0.10.3",
+ "borsh 0.10.4",
  "solana-program",
  "spl-discriminator",
  "spl-pod",

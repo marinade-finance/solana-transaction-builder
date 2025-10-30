@@ -74,7 +74,7 @@ pub async fn execute_transaction_data_in_sequence(
     let sequence_length = execution_data.len();
     let mut errors = TransactionBuilderExecutionErrors::new();
 
-    for (index, async_transaction_builder) in execution_data.into_iter().enumerate() {
+    for (index, async_transaction_builder) in execution_data.iter().enumerate() {
         let human_index = index + 1;
         let tx_uuid = &async_transaction_builder.tx_uuid;
         debug!("Building the transaction {human_index}/{tx_uuid} (size: {sequence_length})");
@@ -126,7 +126,7 @@ pub async fn execute_transaction_data_in_parallel(
 
     // Prepare the list of futures with their associated tx_uuid and human_index
     let futures = execution_data
-        .into_iter()
+        .iter()
         .enumerate()
         .map(|(index, async_transaction_builder)| {
             let human_index = index + 1;

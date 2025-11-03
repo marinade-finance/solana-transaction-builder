@@ -40,15 +40,9 @@ impl std::error::Error for TransactionBuilderExecutionError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TransactionBuilderExecutionErrors {
     errors: Vec<TransactionBuilderExecutionError>,
-}
-
-impl Default for TransactionBuilderExecutionErrors {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl TransactionBuilderExecutionErrors {

@@ -1,0 +1,61 @@
+name: Cargo lint
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  # Not needed in CI, should make things a bit faster
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  # Remove unnecessary WASM build artifacts
+  WASM_BUILD_CLEAN_TARGET: 1
+  # Stripping symbols and optimizing for binary size
+  RUSTFLAGS: -C strip=symbols -C opt-level=s
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 🚧 Checkout project
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Install rust compilation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install libudev-dev pkg-config
+
+      - name: 👨‍🔧 Install Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      - name: 🦿 Install Rust tookchain
+        uses: dtolnay/rust-toolchain@1.75.0
+
+      - name: 🧠 Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: 🧭 Run cargo lint
+        run: cargo fmt -- --check && cargo clippy -- -D warnings
+
+      - name: 🧨 Run cargo tests
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --all-features

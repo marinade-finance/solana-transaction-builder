@@ -40,7 +40,7 @@ impl std::error::Error for TransactionBuilderExecutionError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TransactionBuilderExecutionErrors {
     errors: Vec<TransactionBuilderExecutionError>,
 }

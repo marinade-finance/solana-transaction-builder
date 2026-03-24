@@ -19,11 +19,11 @@ env:
 
 jobs:
   lint-and-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: 🚧 Checkout project
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: ⚙️ Install rust compilation dependencies
         run: |
@@ -31,15 +31,15 @@ jobs:
           sudo apt-get -y install libudev-dev pkg-config
 
       - name: 👨‍🔧 Install Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@3235b876344d2a9aa001b8d1453c930bba69e610 # v3
         with:
           node-version: 20
 
       - name: 🦿 Install Rust tookchain
-        uses: dtolnay/rust-toolchain@1.75.0
+        uses: dtolnay/rust-toolchain@5cdfcfbd9e32fbc2e562bfc289a94537ca9dba61 # 1.75.0
 
       - name: 🧠 Cache Rust dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/bin/
@@ -55,7 +55,7 @@ jobs:
         run: cargo fmt -- --check && cargo clippy -- -D warnings
 
       - name: 🧨 Run cargo tests
-        uses: actions-rs/cargo@v1
+        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1
         with:
           command: test
           args: --all-features

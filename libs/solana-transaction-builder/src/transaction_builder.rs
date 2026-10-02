@@ -283,11 +283,11 @@ impl TransactionBuilder {
         }
     }
 
-    pub fn sequence(&mut self) -> Sequence {
+    pub fn sequence(&mut self) -> Sequence<'_> {
         Sequence { builder: self }
     }
 
-    pub fn sequence_combined(&mut self) -> CombinedSequence {
+    pub fn sequence_combined(&mut self) -> CombinedSequence<'_> {
         CombinedSequence { builder: self }
     }
 

@@ -5062,7 +5062,7 @@ dependencies = [
 [[package]]
 name = "solana-transaction-executor"
 version = "0.0.1"
-source = "git+https://github.com/marinade-finance/solana-transaction-executor?tag=solana-3.0.x#b644ff93937a59623378e53a226a8beb5a7a5418"
+source = "git+https://github.com/marinade-finance/solana-transaction-executor?tag=solana-3.0.x#3e33797faadb49c9feec4d8d1ffb2b182e2ea625"
 dependencies = [
  "anyhow",
  "async-trait",

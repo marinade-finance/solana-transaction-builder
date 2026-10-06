@@ -4,9 +4,9 @@ use cached::proc_macro::cached;
 use log::debug;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_client::SerializableTransaction;
-use solana_sdk::{
-    commitment_config::CommitmentConfig, hash::Hash, transaction::VersionedTransaction,
-};
+use solana_commitment_config::CommitmentConfig;
+use solana_hash::Hash;
+use solana_transaction::versioned::VersionedTransaction;
 use solana_transaction_builder::{
     get_prepared_transaction_iterator, PreparedTransaction, SignedTransaction, TransactionBuilder,
 };

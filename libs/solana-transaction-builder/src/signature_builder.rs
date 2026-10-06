@@ -1,10 +1,9 @@
 use log::error;
-use solana_sdk::{
-    pubkey::Pubkey,
-    signature::{Keypair, Signature, Signer, SignerError},
-    signers::Signers,
-    transaction::Transaction,
-};
+use solana_keypair::Keypair;
+use solana_pubkey::Pubkey;
+use solana_signature::Signature;
+use solana_signer::{signers::Signers, Signer, SignerError};
+use solana_transaction::Transaction;
 use std::collections::HashMap;
 use std::sync::Arc;
 

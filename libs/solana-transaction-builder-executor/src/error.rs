@@ -45,6 +45,12 @@ pub struct TransactionBuilderExecutionErrors {
     errors: Vec<TransactionBuilderExecutionError>,
 }
 
+impl Default for TransactionBuilderExecutionErrors {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TransactionBuilderExecutionErrors {
     pub fn new() -> Self {
         TransactionBuilderExecutionErrors { errors: vec![] }

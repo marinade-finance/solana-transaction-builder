@@ -1,6 +1,7 @@
+use base64::Engine;
 use borsh::{BorshDeserialize, BorshSerialize};
-use solana_sdk::instruction::{AccountMeta, Instruction};
-use solana_sdk::pubkey::Pubkey;
+use solana_instruction::{AccountMeta, Instruction};
+use solana_pubkey::Pubkey;
 
 // Set of struct wrappers that can be used to deserialize instruction.
 // For marinade client it's the base64 format which is used in multisig like SPL Governance.
@@ -65,7 +66,8 @@ pub fn print_base64(instructions: &Vec<Instruction>) -> anyhow::Result<()> {
         println!(
             "program: {}\n  {}",
             instruction.program_id,
-            base64::encode(transaction_instruction.try_to_vec()?)
+            base64::engine::general_purpose::STANDARD
+                .encode(borsh::to_vec(&transaction_instruction)?)
         );
     }
     Ok(())

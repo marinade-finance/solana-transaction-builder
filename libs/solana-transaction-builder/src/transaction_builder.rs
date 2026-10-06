@@ -3,12 +3,12 @@ use crate::signature_builder::SignatureBuilder;
 use anyhow::anyhow;
 use log::error;
 use once_cell::sync::OnceCell;
-use solana_sdk::signature::Keypair;
-use solana_sdk::signers::Signers;
-use solana_sdk::{
-    instruction::Instruction, packet::PACKET_DATA_SIZE, pubkey::Pubkey, signature::Signer,
-    transaction::Transaction,
-};
+use solana_instruction::Instruction;
+use solana_keypair::Keypair;
+use solana_packet::PACKET_DATA_SIZE;
+use solana_pubkey::Pubkey;
+use solana_signer::{signers::Signers, Signer};
+use solana_transaction::Transaction;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -249,8 +249,8 @@ impl TransactionBuilder {
                     Vec<Option<String>>,
                 ) = next_pack.iter().cloned().unzip();
                 // Try to add next pack
-                instructions.extend(next_instructions.into_iter());
-                descriptions.extend(next_descriptions.into_iter());
+                instructions.extend(next_instructions);
+                descriptions.extend(next_descriptions);
                 let transaction_candidate =
                     Transaction::new_with_payer(&instructions, Some(&self.fee_payer));
 
@@ -283,11 +283,11 @@ impl TransactionBuilder {
         }
     }
 
-    pub fn sequence(&mut self) -> Sequence {
+    pub fn sequence(&mut self) -> Sequence<'_> {
         Sequence { builder: self }
     }
 
-    pub fn sequence_combined(&mut self) -> CombinedSequence {
+    pub fn sequence_combined(&mut self) -> CombinedSequence<'_> {
         CombinedSequence { builder: self }
     }
 
@@ -351,8 +351,8 @@ pub fn get_prepared_transaction_iterator<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use solana_sdk::instruction::AccountMeta;
-    use solana_sdk::signature::Keypair;
+    use solana_instruction::AccountMeta;
+    use solana_keypair::Keypair;
 
     #[test]
     fn test_add_signer() {

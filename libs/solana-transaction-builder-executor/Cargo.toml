@@ -10,7 +10,9 @@ cached = {  workspace = true }
 futures = { workspace = true }
 log = { workspace = true }
 solana-client = { workspace = true }
-solana-sdk = {workspace = true}
+solana-commitment-config = { workspace = true }
+solana-hash = { workspace = true }
+solana-transaction = { workspace = true }
 solana-transaction-builder = { workspace = true }
 solana-transaction-executor = { workspace = true }
 tokio = { workspace = true }

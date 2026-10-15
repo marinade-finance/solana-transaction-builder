@@ -4,5 +4,27 @@ version = "0.2.0"
 edition = "2024"
 
 [dependencies]
+anyhow = { workspace = true }
+futures-util = "0.3"
+log = { workspace = true }
+solana-hash = { workspace = true }
+solana-instruction = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-signature = { workspace = true }
+solana-signer = { workspace = true }
+solana-transaction = { workspace = true }
 solana-transaction-builder = { workspace = true }
 solana-transaction-executor = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+litesvm = "=0.16.0"
+solana-client = "~4.2.2"
+solana-compute-budget-interface = { workspace = true }
+solana-keypair = { workspace = true }
+solana-message = { workspace = true }
+solana-system-interface = { workspace = true }
+solana-transaction = { workspace = true, features = ["verify"] }
+solana-transaction-error = { workspace = true }
+solana-transaction-status-client-types = { version = "~4.2.2", features = ["agave-unstable-api"] }
+tokio = { workspace = true }

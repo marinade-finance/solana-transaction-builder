@@ -226,7 +226,7 @@ mod tests {
             let mut transaction = compile(
                 &payer.pubkey(),
                 std::slice::from_ref(&pay),
-                Hash::new_unique(),
+                Hash::default(),
                 version,
                 &full_budget(),
             )
@@ -248,7 +248,7 @@ mod tests {
         let transaction = compile(
             &payer,
             std::slice::from_ref(&pay),
-            Hash::new_unique(),
+            Hash::default(),
             MessageVersion::Legacy,
             &full_budget(),
         )
@@ -288,7 +288,7 @@ mod tests {
         let transaction = compile(
             &payer,
             &[transfer(&payer, &Pubkey::new_unique(), 1)],
-            Hash::new_unique(),
+            Hash::default(),
             MessageVersion::Legacy,
             &Budget {
                 micro_lamports_per_cu: Some(0),
@@ -305,7 +305,7 @@ mod tests {
         let transaction = compile(
             &payer,
             &[transfer(&payer, &Pubkey::new_unique(), 1)],
-            Hash::new_unique(),
+            Hash::default(),
             MessageVersion::V1,
             &full_budget(),
         )
@@ -341,7 +341,7 @@ mod tests {
         let transaction = compile(
             &payer,
             &[transfer(&payer, &Pubkey::new_unique(), 1)],
-            Hash::new_unique(),
+            Hash::default(),
             MessageVersion::V1,
             &Budget::default(),
         )
@@ -365,7 +365,7 @@ mod tests {
                 let result = compile(
                     &payer,
                     &[transfer(&payer, &Pubkey::new_unique(), 1)],
-                    Hash::new_unique(),
+                    Hash::default(),
                     version,
                     &Budget {
                         heap_bytes: Some(heap),
@@ -387,7 +387,7 @@ mod tests {
             let result = compile(
                 &payer,
                 &[ComputeBudgetInstruction::set_compute_unit_limit(1)],
-                Hash::new_unique(),
+                Hash::default(),
                 version,
                 &Budget::default(),
             );
@@ -401,7 +401,7 @@ mod tests {
         let v1 = compile(
             &payer,
             &[noop(64, 0)],
-            Hash::new_unique(),
+            Hash::default(),
             MessageVersion::V1,
             &Budget::default(),
         );
@@ -410,7 +410,7 @@ mod tests {
         let legacy = compile(
             &payer,
             &[noop(127, 0)],
-            Hash::new_unique(),
+            Hash::default(),
             MessageVersion::Legacy,
             &Budget::default(),
         );
@@ -429,7 +429,7 @@ mod tests {
         let v1 = compile(
             &payer,
             &[noop(0, 4_096)],
-            Hash::new_unique(),
+            Hash::default(),
             MessageVersion::V1,
             &Budget::default(),
         );
@@ -441,7 +441,7 @@ mod tests {
         let legacy = compile(
             &payer,
             &[noop(0, 1_232)],
-            Hash::new_unique(),
+            Hash::default(),
             MessageVersion::Legacy,
             &Budget::default(),
         );
@@ -464,7 +464,7 @@ mod tests {
             let mut transaction = compile(
                 &payer.pubkey(),
                 &instructions,
-                Hash::new_unique(),
+                Hash::default(),
                 version,
                 &Budget::default(),
             )

@@ -24,7 +24,7 @@ solana-system-interface = { version = "3", features = ["bincode"] }
 solana-transaction = { version = "~4.3.0", features = ["wincode"] }
 solana-transaction-builder = { path = "./libs/solana-transaction-builder" }
 solana-transaction-error = "3.3"
-solana-transaction-executor = { path = "../solana-transaction-executor" }
+solana-transaction-executor = { git = "https://github.com/marinade-finance/solana-transaction-executor", branch = "solana-to-4.x" }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 wincode = "0.6.1"

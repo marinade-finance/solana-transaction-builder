@@ -18,27 +18,35 @@ The `solana-to-4.x` line uses the Solana 4.x crates; `solana-3.0.x` keeps the ol
   and heap. Legacy places them as Compute Budget instructions ahead of the caller's; v1 places them
   in the message config, pays the rate as a lamport total over the limit, and always sets the
   compute and loaded-accounts limits because v1 reads an unset one as 0.
-- **`pack`** — fills batches in order until the next group would break a cap, measuring each
-  candidate compiled with its widest budget. A group too large alone comes back as an error.
-- **`compile` / `sign`** — compile checks the caps before any key signs; sign fills only the
-  given signers' slots.
+- **`pack`** — fills batches in order until the next group would break one of the given `Limits`,
+  measuring each candidate compiled with its widest budget. A group too large alone comes back as
+  an error; its simulated units count against the compute cap without the margin.
+- **`compile` / `sign`** — compile checks the version's caps before any key signs; sign fills only
+  the given signers' slots and refuses a transaction whose signature slots do not match its header.
 
 ## A run (`solana-transaction-builder-executor::run`)
 
-1. Simulate each group alone; a failing group is reported `Failed` with its logs.
-2. Pack the rest.
-3. Simulate each batch and set its compute and loaded-accounts limits to the measured values plus
-   the margin.
-4. Send through the executor. The first attempt pays the fee policy's start rate, 0 by default; a
-   retry rebuilds with a fresh blockhash and the next rate.
-5. A batch whose failure is proven, refused in simulation or landed with an error, goes again one
-   group per transaction. A batch that is `Unknown` is never sent again: it may still land.
+The groups must be independent: each is simulated alone against the state before the run, so a
+group that spends what an earlier group creates fails its simulation.
+
+1. Refuse a repeated group id as `Failed` and a group whose signer is not given as `NotSent`.
+2. Simulate each group alone; a failing group is reported `Failed` with its logs.
+3. Pack the rest.
+4. Simulate each batch and set its compute and loaded-accounts limits to the measured values plus
+   the margin; without measured units the compute limit is the cap.
+5. Send through the executor, at most its `max_attempts` builds. The first attempt pays the fee
+   policy's start rate, 0 by default; a retry rebuilds with a fresh blockhash and the next rate.
+6. A batch whose failure is proven, or for which nothing was sent, goes again one group per
+   transaction. A batch that landed with an error splits only when the executor waits for each
+   blockhash to expire before a retry. A batch that is `Unknown` is never sent again.
 
 `RunReport` gives each group's status and each transaction's bytes, addresses, consumed units,
 limits, rate, fee, attempts and the executor's whole `Execution`:
 
 - **`Landed`** — the signature and its slot.
 - **`Failed`** — the error and logs, with the landed signature when it failed on chain.
+- **`NotSent`** — no attempt left the process, for example an RPC call failed; the caller may plan
+  the group again.
 - **`NotLanded`** — every attempt expired unfound; the caller may plan the group again.
 - **`Unknown`** — the sent signatures; the caller must not plan the group again until one of them
   is settled.

@@ -12,7 +12,6 @@ solana-instruction = { workspace = true }
 solana-pubkey = { workspace = true }
 solana-signature = { workspace = true }
 solana-signer = { workspace = true }
-solana-transaction = { workspace = true }
 solana-transaction-builder = { workspace = true }
 solana-transaction-executor = { workspace = true }
 

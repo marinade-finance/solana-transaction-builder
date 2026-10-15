@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_hash::Hash;
 use solana_instruction::Instruction;
@@ -27,6 +29,8 @@ pub enum TxError {
     TooManyAddresses { count: usize, max: usize },
     #[error("The transaction is {bytes} bytes, over the cap of {max}")]
     TooLarge { bytes: usize, max: usize },
+    #[error("Malformed transaction: {0}")]
+    Malformed(String),
     #[error("{0} is not a signer of the transaction")]
     NotASigner(Pubkey),
     #[error("{signer} failed to sign: {message}")]
@@ -56,12 +60,29 @@ pub fn compile(
             "a heap of {heap} bytes is not a multiple of 1024 between 32 KiB and 256 KiB"
         )));
     }
+    let limits = Limits::of(version);
     let message = match version {
         MessageVersion::Legacy => {
             let instructions: Vec<Instruction> = legacy_budget(budget)
                 .into_iter()
                 .chain(instructions.iter().cloned())
                 .collect();
+            let count = instructions
+                .iter()
+                .flat_map(|instruction| {
+                    std::iter::once(&instruction.program_id)
+                        .chain(instruction.accounts.iter().map(|account| &account.pubkey))
+                })
+                .chain([payer])
+                .collect::<HashSet<_>>()
+                .len();
+            // The legacy compiler panics once its u8 key indexes overflow.
+            if count > limits.max_addresses {
+                return Err(TxError::TooManyAddresses {
+                    count,
+                    max: limits.max_addresses,
+                });
+            }
             VersionedMessage::Legacy(LegacyMessage::new_with_blockhash(
                 &instructions,
                 Some(payer),
@@ -75,7 +96,6 @@ pub fn compile(
             v1_config(budget),
         )?),
     };
-    let limits = Limits::of(version);
     let count = message.static_account_keys().len();
     if count > limits.max_addresses {
         return Err(TxError::TooManyAddresses {
@@ -117,9 +137,17 @@ pub fn sign(
 ) -> Result<(), TxError> {
     let message = transaction.message.serialize();
     let required = usize::from(transaction.message.header().num_required_signatures);
+    let keys = transaction.message.static_account_keys();
+    if required > keys.len() || transaction.signatures.len() != required {
+        return Err(TxError::Malformed(format!(
+            "{} signature slots and {} keys for {required} required signers",
+            transaction.signatures.len(),
+            keys.len()
+        )));
+    }
     for signer in signers {
         let key = signer.pubkey();
-        let slot = transaction.message.static_account_keys()[..required]
+        let slot = keys[..required]
             .iter()
             .position(|required| *required == key)
             .ok_or(TxError::NotASigner(key))?;
@@ -421,6 +449,56 @@ mod tests {
                 max: 128
             })
         );
+    }
+
+    #[test]
+    fn a_legacy_account_set_over_the_key_index_range_is_refused_not_a_panic() {
+        let payer = Pubkey::new_unique();
+        let legacy = compile(
+            &payer,
+            &[noop(300, 0)],
+            Hash::default(),
+            MessageVersion::Legacy,
+            &Budget::default(),
+        );
+        assert_eq!(
+            legacy,
+            Err(TxError::TooManyAddresses {
+                count: 302,
+                max: 128
+            })
+        );
+    }
+
+    #[test]
+    fn signing_a_malformed_transaction_is_an_error_not_a_panic() {
+        let payer = Keypair::new();
+        let compiled = compile(
+            &payer.pubkey(),
+            &[transfer(&payer.pubkey(), &Pubkey::new_unique(), 1)],
+            Hash::default(),
+            MessageVersion::Legacy,
+            &Budget::default(),
+        )
+        .unwrap();
+
+        let mut no_slots = compiled.clone();
+        no_slots.signatures.clear();
+        assert!(matches!(
+            sign(&mut no_slots, &[&payer]),
+            Err(TxError::Malformed(_))
+        ));
+
+        let mut overclaimed = compiled;
+        let VersionedMessage::Legacy(message) = &mut overclaimed.message else {
+            unreachable!()
+        };
+        message.header.num_required_signatures = 9;
+        overclaimed.signatures = vec![Signature::default(); 9];
+        assert!(matches!(
+            sign(&mut overclaimed, &[&payer]),
+            Err(TxError::Malformed(_))
+        ));
     }
 
     #[test]

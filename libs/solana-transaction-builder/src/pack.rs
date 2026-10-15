@@ -2,10 +2,7 @@ use solana_hash::Hash;
 use solana_instruction::Instruction;
 use solana_pubkey::Pubkey;
 
-use crate::{
-    Budget, DEFAULT_LOADED_ACCOUNTS_DATA_SIZE_LIMIT, Limits, MessageVersion, TxError, compile,
-    valid_heap,
-};
+use crate::{Limits, MessageVersion, TxError, compile, valid_heap, widest_budget, wire_len};
 
 const REQUEST_HEAP_FRAME: u8 = 1;
 const SET_COMPUTE_UNIT_LIMIT: u8 = 2;
@@ -106,7 +103,7 @@ pub fn pack(
                 continue;
             }
         }
-        let alone = join(&Batch::empty(), group);
+        let alone = Batch::from(group);
         match fits(payer, &alone, version, limits) {
             Ok(()) => {
                 if let Some(batch) = current.replace(alone) {
@@ -131,6 +128,12 @@ impl Batch {
             heap_bytes: None,
             compute_units: 0,
         }
+    }
+}
+
+impl From<&Group> for Batch {
+    fn from(group: &Group) -> Self {
+        join(&Batch::empty(), group)
     }
 }
 
@@ -159,27 +162,35 @@ fn fits(
     version: MessageVersion,
     limits: &Limits,
 ) -> Result<(), String> {
-    let units = limits.with_margin(batch.compute_units);
+    let units = batch.compute_units;
     if units > u64::from(limits.max_compute_units) {
         return Err(format!(
-            "{units} compute units with the margin, over the cap of {}",
+            "{units} compute units, over the cap of {}",
             limits.max_compute_units
         ));
     }
-    let widest = Budget {
-        compute_unit_limit: Some(limits.max_compute_units),
-        micro_lamports_per_cu: Some(1),
-        loaded_accounts_data_size_limit: Some(DEFAULT_LOADED_ACCOUNTS_DATA_SIZE_LIMIT),
-        heap_bytes: batch.heap_bytes,
-    };
     let transaction = compile(
         payer,
         &batch.instructions,
         Hash::default(),
         version,
-        &widest,
+        &widest_budget(limits, batch.heap_bytes),
     )
     .map_err(|error: TxError| error.to_string())?;
+    let bytes = wire_len(&transaction);
+    if bytes > limits.max_bytes {
+        return Err(format!(
+            "{bytes} bytes, over the cap of {}",
+            limits.max_bytes
+        ));
+    }
+    let addresses = transaction.message.static_account_keys().len();
+    if addresses > limits.max_addresses {
+        return Err(format!(
+            "{addresses} addresses, over the cap of {}",
+            limits.max_addresses
+        ));
+    }
     let instructions = transaction.message.instructions().len();
     if instructions > limits.max_instructions {
         return Err(format!(
@@ -200,6 +211,7 @@ fn fits(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Budget;
     use solana_compute_budget_interface::ComputeBudgetInstruction;
     use solana_instruction::AccountMeta;
 
@@ -316,7 +328,63 @@ mod tests {
     }
 
     #[test]
-    fn a_batch_closes_before_the_compute_cap_with_the_margin() {
+    fn a_batch_closes_before_the_callers_byte_and_address_caps() {
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        let sized: Vec<Group> = (0..4)
+            .map(|id| of(id, vec![noop(program, vec![], 300)]))
+            .collect();
+        let narrow = Limits {
+            max_bytes: 600,
+            ..Limits::of(MessageVersion::V1)
+        };
+        let (batches, errors) = pack(&payer, &sized, MessageVersion::V1, &narrow);
+        assert_eq!(errors, vec![]);
+        assert_eq!(batches.len(), 4);
+        assert_greedy(&payer, &sized, MessageVersion::V1, &narrow, &batches);
+
+        let wide: Vec<Group> = (0..3)
+            .map(|id| {
+                let accounts = (0..10)
+                    .map(|_| AccountMeta::new_readonly(Pubkey::new_unique(), false))
+                    .collect();
+                of(id, vec![noop(program, accounts, 0)])
+            })
+            .collect();
+        let few = Limits {
+            max_addresses: 15,
+            ..Limits::of(MessageVersion::V1)
+        };
+        let (batches, errors) = pack(&payer, &wide, MessageVersion::V1, &few);
+        assert_eq!(errors, vec![]);
+        assert_eq!(batches.len(), 3);
+        assert_greedy(&payer, &wide, MessageVersion::V1, &few, &batches);
+    }
+
+    #[test]
+    fn a_group_within_the_compute_cap_packs_although_its_margin_crosses_it() {
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        let heavy = |id: usize, units: u32| Group {
+            compute_units: Some(units),
+            ..of(id, vec![noop(program, vec![], 0)])
+        };
+        let limits = Limits::of(MessageVersion::V1);
+
+        let (batches, errors) = pack(&payer, &[heavy(0, 1_300_000)], MessageVersion::V1, &limits);
+        assert_eq!(errors, vec![]);
+        assert_eq!(ids(&batches), vec![vec!["0".to_string()]]);
+
+        let (batches, errors) = pack(&payer, &[heavy(1, 1_400_001)], MessageVersion::V1, &limits);
+        assert_eq!(batches, vec![]);
+        assert!(matches!(
+            errors.as_slice(),
+            [PackError::GroupTooLarge { id, .. }] if id == "1"
+        ));
+    }
+
+    #[test]
+    fn a_batch_closes_before_the_compute_cap() {
         let program = Pubkey::new_unique();
         let groups: Vec<Group> = (0..5)
             .map(|id| Group {

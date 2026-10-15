@@ -2,15 +2,16 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 use async_trait::async_trait;
 use litesvm::LiteSVM;
-use solana_client::rpc_response::{
-    Response, RpcResponseContext, RpcResult, RpcSimulateTransactionResult,
+use solana_client::{
+    client_error::ClientErrorKind,
+    rpc_response::{Response, RpcResponseContext, RpcResult, RpcSimulateTransactionResult},
 };
 use solana_commitment_config::CommitmentConfig;
 use solana_hash::Hash;
@@ -36,7 +37,13 @@ pub struct Chain {
     /// A send naming this account lands with `POISONED` although its simulation passed.
     pub poison: Mutex<Option<Pubkey>>,
     pub drop_sends: AtomicBool,
-    pub blockhash_check_fails: AtomicBool,
+    pub block_height_fails: AtomicBool,
+    block_height: AtomicU64,
+    pub blockhash_reads: AtomicUsize,
+    /// The blockhash read with this index and every later one fail.
+    pub blockhash_fails_from: AtomicUsize,
+    pub simulation_rpc_fails: AtomicBool,
+    pub hide_units: AtomicBool,
 }
 
 pub const POISONED: TransactionError =
@@ -50,7 +57,12 @@ impl Chain {
             landed: Mutex::new(HashMap::new()),
             poison: Mutex::new(None),
             drop_sends: AtomicBool::new(false),
-            blockhash_check_fails: AtomicBool::new(false),
+            block_height_fails: AtomicBool::new(false),
+            block_height: AtomicU64::new(0),
+            blockhash_reads: AtomicUsize::new(0),
+            blockhash_fails_from: AtomicUsize::new(usize::MAX),
+            simulation_rpc_fails: AtomicBool::new(false),
+            hide_units: AtomicBool::new(false),
         })
     }
 
@@ -96,7 +108,8 @@ impl Chain {
                 err,
                 logs: Some(meta.logs),
                 accounts: None,
-                units_consumed: Some(meta.compute_units_consumed),
+                units_consumed: (!self.hide_units.load(Ordering::SeqCst))
+                    .then_some(meta.compute_units_consumed),
                 loaded_accounts_data_size: None,
                 return_data: None,
                 inner_instructions: None,
@@ -125,6 +138,12 @@ impl SimulateTransactionProvider for Chain {
         &self,
         transaction: &VersionedTransaction,
     ) -> RpcResult<RpcSimulateTransactionResult> {
+        if self.simulation_rpc_fails.load(Ordering::SeqCst) {
+            return Err(ClientErrorKind::Custom(
+                "error sending request for url (https://rpc.example.com/?api-key=SECRET)".into(),
+            )
+            .into());
+        }
         let mut transaction = transaction.clone();
         let blockhash = self.svm.lock().unwrap().latest_blockhash();
         transaction.message.set_recent_blockhash(blockhash);
@@ -200,16 +219,23 @@ impl SignatureStatusesProvider for Chain {
         self.get_signature_statuses(signatures).await
     }
 
-    async fn is_blockhash_valid(&self, _blockhash: &Hash) -> anyhow::Result<bool> {
+    async fn latest_blockhash(&self) -> anyhow::Result<(Hash, u64)> {
+        let read = self.blockhash_reads.fetch_add(1, Ordering::SeqCst);
         anyhow::ensure!(
-            !self.blockhash_check_fails.load(Ordering::SeqCst),
+            read < self.blockhash_fails_from.load(Ordering::SeqCst),
             "the node is down"
         );
-        Ok(false)
+        let blockhash = self.svm.lock().unwrap().latest_blockhash();
+        Ok((blockhash, self.block_height.load(Ordering::SeqCst)))
     }
 
-    async fn latest_blockhash(&self) -> anyhow::Result<Hash> {
-        Ok(self.svm.lock().unwrap().latest_blockhash())
+    /// Each read is a new block, so a blockhash expires at the first check after its read.
+    async fn block_height(&self) -> anyhow::Result<u64> {
+        anyhow::ensure!(
+            !self.block_height_fails.load(Ordering::SeqCst),
+            "the node is down"
+        );
+        Ok(self.block_height.fetch_add(1, Ordering::SeqCst) + 1)
     }
 
     fn commitment(&self) -> CommitmentConfig {

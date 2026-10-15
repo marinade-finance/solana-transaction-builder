@@ -1,5 +1,7 @@
 use solana_message::v1::{MAX_HEAP_SIZE, MIN_HEAP_SIZE};
 
+use crate::Limits;
+
 /// A v1 config reads an unset compute-unit limit as 0, so a v1 transaction always carries one.
 pub const DEFAULT_COMPUTE_UNIT_LIMIT: u32 = 1_400_000;
 
@@ -31,6 +33,16 @@ impl Budget {
                 .unwrap_or(DEFAULT_COMPUTE_UNIT_LIMIT),
         );
         u64::try_from((rate * limit).div_ceil(MICRO_LAMPORTS_PER_LAMPORT)).unwrap_or(u64::MAX)
+    }
+}
+
+/// The largest transaction a budget makes; a legacy price is an instruction that costs units.
+pub fn widest_budget(limits: &Limits, heap_bytes: Option<u32>) -> Budget {
+    Budget {
+        compute_unit_limit: Some(limits.max_compute_units),
+        micro_lamports_per_cu: Some(1),
+        loaded_accounts_data_size_limit: Some(DEFAULT_LOADED_ACCOUNTS_DATA_SIZE_LIMIT),
+        heap_bytes,
     }
 }
 

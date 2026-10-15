@@ -1,6 +1,6 @@
 mod chain;
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::Ordering};
 
 use chain::Chain;
 use solana_compute_budget_interface::ComputeBudgetInstruction;
@@ -12,7 +12,7 @@ use solana_system_interface::instruction::transfer;
 use solana_transaction::versioned::VersionedTransaction;
 use solana_transaction_builder::{Group, MessageVersion, group};
 use solana_transaction_builder_executor::{GroupStatus, RunConfig, RunReport, run};
-use solana_transaction_executor::FeePolicy;
+use solana_transaction_executor::{FeePolicy, TransactionExecutor};
 
 const ALL: [MessageVersion; 2] = [MessageVersion::Legacy, MessageVersion::V1];
 const SOL: u64 = 1_000_000_000;
@@ -42,15 +42,17 @@ impl World {
     }
 
     async fn run(&self, groups: Vec<Group>, config: &RunConfig) -> RunReport {
+        self.run_on(&self.chain.executor(), groups, config).await
+    }
+
+    async fn run_on(
+        &self,
+        executor: &TransactionExecutor,
+        groups: Vec<Group>,
+        config: &RunConfig,
+    ) -> RunReport {
         let signer: Arc<dyn Signer + Send + Sync> = self.payer.clone();
-        run(
-            &self.chain.executor(),
-            &self.payer.pubkey(),
-            groups,
-            &[signer],
-            config,
-        )
-        .await
+        run(executor, &self.payer.pubkey(), groups, &[signer], config).await
     }
 
     fn sent(&self) -> Vec<VersionedTransaction> {
@@ -126,10 +128,13 @@ async fn three_groups_land_in_one_transaction() {
 async fn a_group_that_fails_alone_is_reported_and_the_rest_land() {
     for version in ALL {
         let world = world();
-        let poor = Keypair::new();
         let broke = group(
             "broke",
-            vec![transfer(&poor.pubkey(), &Pubkey::new_unique(), AMOUNT)],
+            vec![transfer(
+                &world.payer.pubkey(),
+                &Pubkey::new_unique(),
+                100 * SOL,
+            )],
         )
         .unwrap();
         let groups = vec![world.pay(0).0, broke, world.pay(1).0];
@@ -379,6 +384,194 @@ async fn a_batch_the_chain_never_takes_did_not_land_after_every_attempt() {
             &GroupStatus::NotLanded { attempts: 3 }
         );
         assert_eq!(world.sent().len(), 3, "{version:?}");
+        assert_eq!(
+            world.chain.blockhash_reads.load(Ordering::SeqCst),
+            3,
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_duplicate_group_id_is_refused_and_never_sent() {
+    for version in ALL {
+        let world = world();
+        let (first, kept) = world.pay(0);
+        let (second, dropped) = world.pay(1);
+        let second = Group {
+            id: first.id.clone(),
+            ..second
+        };
+
+        let report = world
+            .run(vec![first, second], &RunConfig::new(version))
+            .await;
+
+        assert_eq!(report.groups.len(), 2, "{version:?}");
+        assert_eq!(landed(&report), 1, "{version:?} {report:?}");
+        assert!(
+            report.groups.iter().any(|outcome| matches!(&outcome.status, GroupStatus::Failed { error, signature: None, .. } if error == "duplicate group id")),
+            "{version:?} {report:?}"
+        );
+        assert_eq!(report.transactions.len(), 1, "{version:?}");
+        assert_eq!(world.sent().len(), 1, "{version:?}");
+        assert_eq!(world.chain.balance(&kept), AMOUNT, "{version:?}");
+        assert_eq!(world.chain.balance(&dropped), 0, "{version:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_group_missing_a_signer_is_not_sent_and_the_others_land() {
+    for version in ALL {
+        let world = world();
+        let stranger = Keypair::new();
+        world.chain.airdrop(&stranger.pubkey(), SOL);
+        let unsigned = group(
+            "unsigned",
+            vec![transfer(&stranger.pubkey(), &Pubkey::new_unique(), AMOUNT)],
+        )
+        .unwrap();
+        let (signed, to) = world.pay(0);
+
+        let report = world
+            .run(vec![unsigned, signed], &RunConfig::new(version))
+            .await;
+
+        assert_eq!(
+            status(&report, "unsigned"),
+            &GroupStatus::NotSent {
+                reason: format!("missing signer {}", stranger.pubkey())
+            },
+            "{version:?}"
+        );
+        assert!(
+            matches!(status(&report, "0"), GroupStatus::Landed { .. }),
+            "{version:?} {report:?}"
+        );
+        assert_eq!(world.chain.balance(&to), AMOUNT, "{version:?}");
+        assert_eq!(world.sent().len(), 1, "{version:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_batch_nothing_was_sent_for_is_split_and_reported_not_sent() {
+    for version in ALL {
+        let world = world();
+        world.chain.blockhash_fails_from.store(0, Ordering::SeqCst);
+
+        let report = world
+            .run(
+                vec![world.pay(0).0, world.pay(1).0],
+                &RunConfig::new(version),
+            )
+            .await;
+
+        for id in ["0", "1"] {
+            assert!(
+                matches!(status(&report, id), GroupStatus::NotSent { reason } if reason.contains("the node is down")),
+                "{version:?} {report:?}"
+            );
+        }
+        assert_eq!(report.groups.len(), 2, "{version:?}");
+        assert_eq!(report.transactions.len(), 3, "{version:?}");
+        assert!(world.sent().is_empty(), "{version:?}");
+    }
+}
+
+#[tokio::test]
+async fn an_attempt_that_expired_before_a_failed_rebuild_is_not_landed() {
+    for version in ALL {
+        let world = world();
+        world.chain.drop_sends.store(true, Ordering::SeqCst);
+        world.chain.blockhash_fails_from.store(1, Ordering::SeqCst);
+
+        let report = world
+            .run(vec![world.pay(0).0], &RunConfig::new(version))
+            .await;
+
+        assert_eq!(
+            status(&report, "0"),
+            &GroupStatus::NotLanded { attempts: 1 },
+            "{version:?} {report:?}"
+        );
+        assert_eq!(world.sent().len(), 1, "{version:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_simulation_the_rpc_cannot_run_is_not_sent() {
+    for version in ALL {
+        let world = world();
+        world
+            .chain
+            .simulation_rpc_fails
+            .store(true, Ordering::SeqCst);
+
+        let report = world
+            .run(
+                vec![world.pay(0).0, world.pay(1).0],
+                &RunConfig::new(version),
+            )
+            .await;
+
+        for id in ["0", "1"] {
+            assert_eq!(
+                status(&report, id),
+                &GroupStatus::NotSent {
+                    reason: "Simulation could not run".into()
+                },
+                "{version:?}"
+            );
+        }
+        assert!(report.transactions.is_empty(), "{version:?}");
+        assert!(world.sent().is_empty(), "{version:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_simulation_without_units_sends_the_maximum_compute_limit() {
+    for version in ALL {
+        let world = world();
+        world.chain.hide_units.store(true, Ordering::SeqCst);
+        let config = RunConfig::new(version);
+
+        let report = world.run(vec![world.pay(0).0], &config).await;
+
+        assert_eq!(landed(&report), 1, "{version:?} {report:?}");
+        assert_eq!(
+            compute_unit_limit(&world.sent()[0]),
+            Some(config.limits.max_compute_units),
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_batch_that_lands_with_an_error_is_not_split_without_the_expiry_wait() {
+    for version in ALL {
+        let world = world();
+        let (good, first) = world.pay(0);
+        let (bad, poisoned) = world.pay(1);
+        *world.chain.poison.lock().unwrap() = Some(poisoned);
+        let mut executor = world.chain.executor();
+        executor
+            .transaction_executor_config
+            .wait_for_blockhash_expiry_before_retry = false;
+
+        let report = world
+            .run_on(&executor, vec![good, bad], &RunConfig::new(version))
+            .await;
+
+        let sent = world.sent()[0].signatures[0];
+        for id in ["0", "1"] {
+            assert!(
+                matches!(status(&report, id), GroupStatus::Failed { signature: Some(signature), .. } if *signature == sent),
+                "{version:?} {report:?}"
+            );
+        }
+        assert_eq!(report.transactions.len(), 1, "{version:?}");
+        assert_eq!(world.sent().len(), 1, "{version:?}");
+        assert_eq!(world.chain.balance(&first), 0, "{version:?}");
     }
 }
 
@@ -392,7 +585,7 @@ async fn an_unknown_batch_is_not_retried() {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         world
             .chain
-            .blockhash_check_fails
+            .block_height_fails
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
         let report = world

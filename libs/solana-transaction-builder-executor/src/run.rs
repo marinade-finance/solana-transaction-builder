@@ -1,10 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicU32, Ordering},
-    },
-};
+use std::{collections::HashMap, sync::Arc};
 
 use futures_util::stream;
 use log::{info, warn};
@@ -17,7 +11,9 @@ use solana_transaction_builder::{
     Batch, Budget, DEFAULT_LOADED_ACCOUNTS_DATA_SIZE_LIMIT, Group, Limits, MessageVersion, compile,
     pack, sign, wire_len,
 };
-use solana_transaction_executor::{FeePolicy, Simulation, TransactionExecutor};
+use solana_transaction_executor::{
+    Execution, FeePolicy, NotLanded, Outcome, Simulation, TransactionExecutor,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunConfig {
@@ -40,9 +36,24 @@ impl RunConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GroupStatus {
-    Landed { signature: Signature },
-    Failed { error: String, logs: Vec<String> },
-    Unconfirmed { error: String },
+    Landed {
+        signature: Signature,
+        slot: u64,
+    },
+    Failed {
+        error: String,
+        logs: Vec<String>,
+        signature: Option<Signature>,
+    },
+    /// Every attempt's blockhash expired and none landed; safe to plan again.
+    NotLanded {
+        attempts: u32,
+    },
+    /// An attempt may still land; planning the group again could run it twice.
+    Unknown {
+        reason: String,
+        signatures: Vec<Signature>,
+    },
     Planned,
 }
 
@@ -65,6 +76,7 @@ pub struct TxReport {
     pub priority_fee_lamports: u64,
     pub attempts: u32,
     pub signature: Option<Signature>,
+    pub execution: Option<Execution>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -92,11 +104,12 @@ impl From<Failure> for GroupStatus {
         GroupStatus::Failed {
             error: failure.error,
             logs: failure.logs,
+            signature: None,
         }
     }
 }
 
-/// A group failing alone is dropped; a batch failing as a whole goes one group per transaction.
+/// A batch whose failure is proven, in simulation or on chain, goes one group per transaction.
 pub async fn run(
     executor: &TransactionExecutor,
     payer: &Pubkey,
@@ -128,6 +141,7 @@ pub async fn run(
             GroupStatus::Failed {
                 error: error.to_string(),
                 logs: vec![],
+                signature: None,
             },
         );
     }
@@ -136,7 +150,7 @@ pub async fn run(
         .map(|group| (group.id.clone(), group))
         .collect();
     for batch in batches {
-        match simulate(executor, payer, &batch, config).await {
+        let split = match simulate(executor, payer, &batch, config).await {
             Ok(simulation) => {
                 send(
                     executor,
@@ -151,30 +165,36 @@ pub async fn run(
             }
             Err(failure) if batch.group_ids.len() == 1 => {
                 report.set(&batch.group_ids, failure.into());
+                false
             }
             Err(failure) => {
                 warn!(
-                    "Batch {:?} failed together ({}); sending its groups one by one",
+                    "Batch {:?} failed together in simulation ({})",
                     batch.group_ids, failure.error
                 );
-                for id in &batch.group_ids {
-                    let single = alone(&by_id[id]);
-                    match simulate(executor, payer, &single, config).await {
-                        Ok(simulation) => {
-                            send(
-                                executor,
-                                payer,
-                                &single,
-                                &simulation,
-                                signers,
-                                config,
-                                &mut report,
-                            )
-                            .await
-                        }
-                        Err(failure) => report.set(&single.group_ids, failure.into()),
-                    }
+                true
+            }
+        };
+        if !split {
+            continue;
+        }
+        info!("Sending the groups of {:?} one by one", batch.group_ids);
+        for id in &batch.group_ids {
+            let single = alone(&by_id[id]);
+            match simulate(executor, payer, &single, config).await {
+                Ok(simulation) => {
+                    send(
+                        executor,
+                        payer,
+                        &single,
+                        &simulation,
+                        signers,
+                        config,
+                        &mut report,
+                    )
+                    .await;
                 }
+                Err(failure) => report.set(&single.group_ids, failure.into()),
             }
         }
     }
@@ -230,6 +250,7 @@ async fn simulate(
     }
 }
 
+/// Reports the batch, or returns true when its groups should be sent one by one instead.
 async fn send(
     executor: &TransactionExecutor,
     payer: &Pubkey,
@@ -238,7 +259,7 @@ async fn send(
     signers: &[Arc<dyn Signer + Send + Sync>],
     config: &RunConfig,
     report: &mut RunReport,
-) {
+) -> bool {
     let limits = &config.limits;
     let consumed = simulation.units_consumed.unwrap_or(0);
     let compute_unit_limit = u32::try_from(limits.with_margin(consumed))
@@ -272,9 +293,10 @@ async fn send(
                 GroupStatus::Failed {
                     error: error.to_string(),
                     logs: vec![],
+                    signature: None,
                 },
             );
-            return;
+            return false;
         }
     };
     let mut tx_report = TxReport {
@@ -288,16 +310,15 @@ async fn send(
         priority_fee_lamports: budget(first).priority_fee_lamports(),
         attempts: 0,
         signature: None,
+        execution: None,
     };
     if config.dry_run {
         report.set(&batch.group_ids, GroupStatus::Planned);
         report.transactions.push(tx_report);
-        return;
+        return false;
     }
 
     let writable = writable_accounts(payer, batch);
-    let attempts = AtomicU32::new(0);
-    let attempts_ref = &attempts;
     let budget_ref = &budget;
     let writable_ref = &writable;
     let attempts_stream = stream::unfold(None, |previous: Option<u64>| async move {
@@ -309,7 +330,6 @@ async fn send(
                     .await
             }
         };
-        attempts_ref.fetch_add(1, Ordering::SeqCst);
         let built = build(
             executor,
             payer,
@@ -321,22 +341,62 @@ async fn send(
         .await;
         Some((built, Some(rate)))
     });
-    let outcome = executor.execute_transaction(attempts_stream).await;
-    tx_report.attempts = attempts.load(Ordering::SeqCst);
-    match outcome {
-        Ok(signature) => {
+    let execution = executor.execute_transaction(attempts_stream).await;
+    tx_report.attempts = u32::try_from(execution.attempts.len()).unwrap_or(u32::MAX);
+    let alone = batch.group_ids.len() == 1;
+    let mut split = false;
+    let status = match &execution.outcome {
+        Outcome::Landed { signature, slot } => {
             info!("Batch {:?} landed as {signature}", batch.group_ids);
-            tx_report.signature = Some(signature);
-            report.set(&batch.group_ids, GroupStatus::Landed { signature });
+            tx_report.signature = Some(*signature);
+            Some(GroupStatus::Landed {
+                signature: *signature,
+                slot: *slot,
+            })
         }
-        Err(error) => report.set(
-            &batch.group_ids,
-            GroupStatus::Unconfirmed {
+        Outcome::LandedWithError {
+            signature, error, ..
+        } => {
+            tx_report.signature = Some(*signature);
+            split = !alone;
+            alone.then(|| GroupStatus::Failed {
                 error: error.to_string(),
-            },
-        ),
+                logs: vec![],
+                signature: Some(*signature),
+            })
+        }
+        Outcome::NotLanded(NotLanded::Refused { error, logs }) => {
+            split = !alone;
+            alone.then(|| GroupStatus::Failed {
+                error: error.to_string(),
+                logs: logs.clone(),
+                signature: None,
+            })
+        }
+        Outcome::NotLanded(NotLanded::NotSent { error }) => Some(GroupStatus::Failed {
+            error: error.clone(),
+            logs: vec![],
+            signature: None,
+        }),
+        Outcome::NotLanded(NotLanded::Expired) => Some(GroupStatus::NotLanded {
+            attempts: tx_report.attempts,
+        }),
+        Outcome::Unknown { reason } => Some(GroupStatus::Unknown {
+            reason: reason.clone(),
+            signatures: execution
+                .attempts
+                .iter()
+                .filter(|attempt| attempt.sent)
+                .map(|attempt| attempt.signature)
+                .collect(),
+        }),
+    };
+    if let Some(status) = status {
+        report.set(&batch.group_ids, status);
     }
+    tx_report.execution = Some(execution);
     report.transactions.push(tx_report);
+    split
 }
 
 async fn build(

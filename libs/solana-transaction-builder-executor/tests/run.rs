@@ -292,3 +292,124 @@ async fn groups_over_the_byte_cap_land_in_several_transactions() {
         }
     }
 }
+
+fn status<'a>(report: &'a RunReport, id: &str) -> &'a GroupStatus {
+    &report
+        .groups
+        .iter()
+        .find(|outcome| outcome.id == id)
+        .unwrap()
+        .status
+}
+
+#[tokio::test]
+async fn a_batch_that_lands_with_an_error_is_retried_group_by_group() {
+    for version in ALL {
+        let world = world();
+        let (good, first) = world.pay(0);
+        let (bad, poisoned) = world.pay(1);
+        let (other, last) = world.pay(2);
+        *world.chain.poison.lock().unwrap() = Some(poisoned);
+
+        let report = world
+            .run(vec![good, bad, other], &RunConfig::new(version))
+            .await;
+
+        assert!(
+            matches!(status(&report, "0"), GroupStatus::Landed { .. }),
+            "{version:?} {report:?}"
+        );
+        assert!(matches!(status(&report, "2"), GroupStatus::Landed { .. }));
+        assert!(
+            matches!(
+                status(&report, "1"),
+                GroupStatus::Failed { signature: Some(_), error, .. } if error.contains("custom program error: 0x4d")
+            ),
+            "{version:?} {report:?}"
+        );
+        assert_eq!(report.groups.len(), 3, "{version:?}");
+        assert_eq!(report.transactions.len(), 4, "{version:?}");
+        assert_eq!(world.chain.balance(&first), AMOUNT);
+        assert_eq!(world.chain.balance(&last), AMOUNT);
+        assert_eq!(world.chain.balance(&poisoned), 0);
+    }
+}
+
+#[tokio::test]
+async fn a_single_group_that_lands_with_an_error_fails_with_its_signature() {
+    for version in ALL {
+        let world = world();
+        let (bad, poisoned) = world.pay(0);
+        *world.chain.poison.lock().unwrap() = Some(poisoned);
+
+        let report = world.run(vec![bad], &RunConfig::new(version)).await;
+
+        let sent = world.sent()[0].signatures[0];
+        assert!(
+            matches!(status(&report, "0"), GroupStatus::Failed { signature: Some(signature), .. } if *signature == sent),
+            "{version:?} {report:?}"
+        );
+        assert_eq!(world.sent().len(), 1, "{version:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_batch_the_chain_never_takes_did_not_land_after_every_attempt() {
+    for version in ALL {
+        let world = world();
+        world
+            .chain
+            .drop_sends
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let report = world
+            .run(
+                vec![world.pay(0).0, world.pay(1).0],
+                &RunConfig::new(version),
+            )
+            .await;
+
+        assert_eq!(
+            status(&report, "0"),
+            &GroupStatus::NotLanded { attempts: 3 },
+            "{version:?} {report:?}"
+        );
+        assert_eq!(
+            status(&report, "1"),
+            &GroupStatus::NotLanded { attempts: 3 }
+        );
+        assert_eq!(world.sent().len(), 3, "{version:?}");
+    }
+}
+
+#[tokio::test]
+async fn an_unknown_batch_is_not_retried() {
+    for version in ALL {
+        let world = world();
+        world
+            .chain
+            .drop_sends
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        world
+            .chain
+            .blockhash_check_fails
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let report = world
+            .run(
+                vec![world.pay(0).0, world.pay(1).0],
+                &RunConfig::new(version),
+            )
+            .await;
+
+        let sent = world.sent()[0].signatures[0];
+        for id in ["0", "1"] {
+            assert!(
+                matches!(status(&report, id), GroupStatus::Unknown { signatures, .. } if signatures == &vec![sent]),
+                "{version:?} {report:?}"
+            );
+        }
+        assert_eq!(world.sent().len(), 1, "{version:?}");
+        assert_eq!(report.transactions.len(), 1, "{version:?}");
+    }
+}

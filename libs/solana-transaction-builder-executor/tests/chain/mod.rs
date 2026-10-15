@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -11,6 +14,7 @@ use solana_client::rpc_response::{
 };
 use solana_commitment_config::CommitmentConfig;
 use solana_hash::Hash;
+use solana_instruction::error::InstructionError;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use solana_transaction::versioned::VersionedTransaction;
@@ -29,7 +33,14 @@ pub struct Chain {
     pub svm: Mutex<LiteSVM>,
     pub sent: Mutex<Vec<VersionedTransaction>>,
     landed: Mutex<HashMap<Signature, Result<(), TransactionError>>>,
+    /// A send naming this account lands with `POISONED` although its simulation passed.
+    pub poison: Mutex<Option<Pubkey>>,
+    pub drop_sends: AtomicBool,
+    pub blockhash_check_fails: AtomicBool,
 }
+
+pub const POISONED: TransactionError =
+    TransactionError::InstructionError(0, InstructionError::Custom(77));
 
 impl Chain {
     pub fn new() -> Arc<Self> {
@@ -37,15 +48,18 @@ impl Chain {
             svm: Mutex::new(LiteSVM::new().with_sigverify(false)),
             sent: Mutex::new(Vec::new()),
             landed: Mutex::new(HashMap::new()),
+            poison: Mutex::new(None),
+            drop_sends: AtomicBool::new(false),
+            blockhash_check_fails: AtomicBool::new(false),
         })
     }
 
     pub fn executor(self: &Arc<Self>) -> TransactionExecutor {
         TransactionExecutor::new(
             TransactionExecutorConfig {
-                signature_status_check_interval: Duration::from_millis(100),
-                transaction_send_interval: Duration::from_secs(2),
-                waiting_time_after_last_send: Duration::from_secs(3),
+                signature_status_check_interval: Duration::from_millis(50),
+                transaction_send_interval: Duration::from_millis(200),
+                waiting_time_after_last_send: Duration::from_secs(1),
                 max_attempts: 3,
                 ..TransactionExecutorConfig::default()
             },
@@ -131,13 +145,22 @@ impl SendTransactionProvider for Chain {
         );
         self.sent.lock().unwrap().push(transaction.clone());
         let signature = transaction.signatures[0];
-        let result = self
-            .svm
-            .lock()
-            .unwrap()
-            .send_transaction(transaction.clone())
-            .map(|_| ())
-            .map_err(|failed| failed.err);
+        if self.drop_sends.load(Ordering::SeqCst) {
+            return Ok(signature);
+        }
+        let poison = *self.poison.lock().unwrap();
+        let result = if poison
+            .is_some_and(|poison| transaction.message.static_account_keys().contains(&poison))
+        {
+            Err(POISONED)
+        } else {
+            self.svm
+                .lock()
+                .unwrap()
+                .send_transaction(transaction.clone())
+                .map(|_| ())
+                .map_err(|failed| failed.err)
+        };
         self.landed.lock().unwrap().insert(signature, result);
         Ok(signature)
     }
@@ -178,6 +201,10 @@ impl SignatureStatusesProvider for Chain {
     }
 
     async fn is_blockhash_valid(&self, _blockhash: &Hash) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            !self.blockhash_check_fails.load(Ordering::SeqCst),
+            "the node is down"
+        );
         Ok(false)
     }
 

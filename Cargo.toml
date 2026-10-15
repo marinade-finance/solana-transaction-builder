@@ -15,16 +15,16 @@ solana-compute-budget-interface = "3"
 solana-hash = "4.4"
 solana-instruction = "3.4"
 solana-keypair = "3.1"
-solana-message = { version = "~4.4.1", features = ["wincode"] }
+solana-message = { version = "~4.6.0", features = ["wincode"] }
 solana-packet = "4.2"
 solana-pubkey = "4.2"
 solana-signature = "3.4"
 solana-signer = "3"
 solana-system-interface = { version = "3", features = ["bincode"] }
-solana-transaction = { version = "~4.1.6", features = ["wincode"] }
+solana-transaction = { version = "~4.3.0", features = ["wincode"] }
 solana-transaction-builder = { path = "./libs/solana-transaction-builder" }
 solana-transaction-error = "3.3"
 solana-transaction-executor = { path = "../solana-transaction-executor" }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-wincode = "0.5.5"
+wincode = "0.6.1"

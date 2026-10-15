@@ -28,9 +28,18 @@ The `solana-to-4.x` line uses the Solana 4.x crates; `solana-3.0.x` keeps the ol
 1. Simulate each group alone; a failing group is reported `Failed` with its logs.
 2. Pack the rest.
 3. Simulate each batch and set its compute and loaded-accounts limits to the measured values plus
-   the margin. A batch that fails as a whole goes one group per transaction.
+   the margin.
 4. Send through the executor. The first attempt pays the fee policy's start rate, 0 by default; a
    retry rebuilds with a fresh blockhash and the next rate.
+5. A batch whose failure is proven, refused in simulation or landed with an error, goes again one
+   group per transaction. A batch that is `Unknown` is never sent again: it may still land.
 
-`RunReport` gives each group's status (`Landed`, `Failed`, `Unconfirmed` or `Planned` in a dry
-run) and each transaction's bytes, addresses, consumed units, limits, rate, fee and attempts.
+`RunReport` gives each group's status and each transaction's bytes, addresses, consumed units,
+limits, rate, fee, attempts and the executor's whole `Execution`:
+
+- **`Landed`** — the signature and its slot.
+- **`Failed`** — the error and logs, with the landed signature when it failed on chain.
+- **`NotLanded`** — every attempt expired unfound; the caller may plan the group again.
+- **`Unknown`** — the sent signatures; the caller must not plan the group again until one of them
+  is settled.
+- **`Planned`** — a dry run.

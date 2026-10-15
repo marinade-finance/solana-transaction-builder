@@ -2,6 +2,8 @@
 name = "solana-transaction-builder"
 version = "0.2.0"
 edition = "2024"
+license.workspace = true
+publish = false
 
 [dependencies]
 solana-compute-budget-interface = { workspace = true }

@@ -435,6 +435,7 @@ async fn build(
     Ok(AttemptTransaction {
         transaction,
         last_valid_block_height,
+        sent_before: false,
     })
 }
 

@@ -20,6 +20,7 @@ solana-transaction-executor = { workspace = true }
 async-trait = { workspace = true }
 litesvm = "=0.16.0"
 solana-client = "~4.2.2"
+solana-commitment-config = "3.1"
 solana-compute-budget-interface = { workspace = true }
 solana-keypair = { workspace = true }
 solana-message = { workspace = true }

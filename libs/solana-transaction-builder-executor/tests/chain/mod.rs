@@ -9,6 +9,7 @@ use litesvm::LiteSVM;
 use solana_client::rpc_response::{
     Response, RpcResponseContext, RpcResult, RpcSimulateTransactionResult,
 };
+use solana_commitment_config::CommitmentConfig;
 use solana_hash::Hash;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
@@ -162,11 +163,18 @@ impl SignatureStatusesProvider for Chain {
                         confirmations: None,
                         status: result.clone(),
                         err: result.clone().err(),
-                        confirmation_status: Some(TransactionConfirmationStatus::Confirmed),
+                        confirmation_status: Some(TransactionConfirmationStatus::Finalized),
                     })
                 })
                 .collect(),
         })
+    }
+
+    async fn get_signature_statuses_with_history(
+        &self,
+        signatures: &[Signature],
+    ) -> RpcResult<Vec<Option<TransactionStatus>>> {
+        self.get_signature_statuses(signatures).await
     }
 
     async fn is_blockhash_valid(&self, _blockhash: &Hash) -> anyhow::Result<bool> {
@@ -175,6 +183,10 @@ impl SignatureStatusesProvider for Chain {
 
     async fn latest_blockhash(&self) -> anyhow::Result<Hash> {
         Ok(self.svm.lock().unwrap().latest_blockhash())
+    }
+
+    fn commitment(&self) -> CommitmentConfig {
+        CommitmentConfig::finalized()
     }
 }
 

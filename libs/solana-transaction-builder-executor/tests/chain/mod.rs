@@ -45,6 +45,7 @@ pub struct Chain {
     pub blockhash_fails_from: AtomicUsize,
     pub simulation_rpc_fails: AtomicBool,
     pub hide_units: AtomicBool,
+    pub recent_fees: Mutex<Vec<u64>>,
 }
 
 pub const POISONED: TransactionError =
@@ -65,6 +66,7 @@ impl Chain {
             blockhash_fails_from: AtomicUsize::new(usize::MAX),
             simulation_rpc_fails: AtomicBool::new(false),
             hide_units: AtomicBool::new(false),
+            recent_fees: Mutex::new(Vec::new()),
         })
     }
 
@@ -254,6 +256,6 @@ impl SignatureStatusesProvider for Chain {
 #[async_trait]
 impl PrioritizationFeesProvider for Chain {
     async fn recent_prioritization_fees(&self, _writable: &[Pubkey]) -> anyhow::Result<Vec<u64>> {
-        Ok(vec![])
+        Ok(self.recent_fees.lock().unwrap().clone())
     }
 }

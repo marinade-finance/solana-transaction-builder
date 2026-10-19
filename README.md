@@ -11,6 +11,7 @@ The `solana-to-4.x` line uses the Solana 4.x crates; `solana-3.0.x` keeps the ol
 - **`Group`** — instructions that land in one transaction or not at all. `group()` lifts a
   caller's Compute Budget instructions: a heap request stays with the group, a limit or a price is
   dropped because the run sets them per transaction. A group with no other instruction is refused.
+  `group()` is the only constructor; `with_heap` replaces the heap and checks it the same way.
 - **`MessageVersion`** — `Legacy` or `V1`. `Limits::of` gives its caps: legacy 1,232 bytes and 128
   account locks; v1 4,096 bytes, 64 addresses and 12 signatures; both 64 instructions and 1.4M
   compute units, with a 10% margin.
@@ -36,7 +37,8 @@ group that spends what an earlier group creates fails its simulation.
 4. Simulate each batch and set its compute and loaded-accounts limits to the measured values plus
    the margin; without measured units the compute limit is the cap.
 5. Send through the executor, at most its `max_attempts` builds. The first attempt pays the fee
-   policy's start rate, 0 by default; a retry rebuilds with a fresh blockhash and the next rate.
+   policy's start rate, 0 by default, or the network's rate under `FeeStrategy::Dynamic`; a retry
+   rebuilds with a fresh blockhash and the next rate.
 6. A batch whose failure is proven, or for which nothing was sent, goes again one group per
    transaction. A batch that landed with an error splits only when the executor waits for each
    blockhash to expire before a retry. A batch that is `Unknown` is never sent again.

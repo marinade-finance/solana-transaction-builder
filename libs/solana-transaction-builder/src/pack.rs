@@ -9,13 +9,51 @@ const SET_COMPUTE_UNIT_LIMIT: u8 = 2;
 const SET_COMPUTE_UNIT_PRICE: u8 = 3;
 const SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT: u8 = 4;
 
-/// Instructions that land in one transaction or not at all.
+/// Instructions that land in one transaction or not at all; built only through `group()`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Group {
-    pub id: String,
-    pub instructions: Vec<Instruction>,
-    pub heap_bytes: Option<u32>,
-    pub compute_units: Option<u32>,
+    id: String,
+    instructions: Vec<Instruction>,
+    heap_bytes: Option<u32>,
+    compute_units: Option<u32>,
+}
+
+impl Group {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn instructions(&self) -> &[Instruction] {
+        &self.instructions
+    }
+
+    pub fn heap_bytes(&self) -> Option<u32> {
+        self.heap_bytes
+    }
+
+    pub fn compute_units(&self) -> Option<u32> {
+        self.compute_units
+    }
+
+    pub fn with_heap(self, heap_bytes: Option<u32>) -> Result<Self, PackError> {
+        if let Some(bytes) = heap_bytes
+            && !valid_heap(bytes)
+        {
+            return Err(PackError::Budget {
+                id: self.id,
+                reason: format!("a heap of {bytes} bytes is not valid"),
+            });
+        }
+        Ok(Self { heap_bytes, ..self })
+    }
+
+    /// The simulated units, which `pack` counts against the compute cap.
+    pub fn with_compute_units(self, compute_units: Option<u32>) -> Self {
+        Self {
+            compute_units,
+            ..self
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,22 +110,20 @@ pub fn group(id: impl Into<String>, instructions: Vec<Instruction>) -> Result<Gr
             )));
         }
         if tag == REQUEST_HEAP_FRAME {
-            let bytes = u32::from_le_bytes([value[0], value[1], value[2], value[3]]);
-            if !valid_heap(bytes) {
-                return Err(refuse(format!("a heap of {bytes} bytes is not valid")));
-            }
-            heap_bytes = Some(bytes);
+            heap_bytes = Some(u32::from_le_bytes([value[0], value[1], value[2], value[3]]));
         }
     }
-    if kept.is_empty() {
-        return Err(PackError::Empty { id });
-    }
-    Ok(Group {
+    let group = Group {
         id,
         instructions: kept,
-        heap_bytes,
+        heap_bytes: None,
         compute_units: None,
-    })
+    }
+    .with_heap(heap_bytes)?;
+    if group.instructions.is_empty() {
+        return Err(PackError::Empty { id: group.id });
+    }
+    Ok(group)
 }
 
 /// Greedy and order-keeping; a group too large alone becomes an error and the rest still pack.
@@ -503,6 +539,17 @@ mod tests {
             vec![ComputeBudgetInstruction::request_heap_frame(1_000)],
         );
         assert!(matches!(bad_heap, Err(PackError::Budget { .. })));
+    }
+
+    #[test]
+    fn a_heap_set_after_the_group_is_validated() {
+        let plain = group("g", vec![noop(Pubkey::new_unique(), vec![], 1)]).unwrap();
+        let heap = plain.clone().with_heap(Some(64 * 1024)).unwrap();
+        assert_eq!(heap.heap_bytes(), Some(64 * 1024));
+        assert!(matches!(
+            plain.with_heap(Some(1_000)),
+            Err(PackError::Budget { id, .. }) if id == "g"
+        ));
     }
 
     #[test]

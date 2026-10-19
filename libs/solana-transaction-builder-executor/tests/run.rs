@@ -12,7 +12,7 @@ use solana_system_interface::instruction::transfer;
 use solana_transaction::versioned::VersionedTransaction;
 use solana_transaction_builder::{Group, MessageVersion, group};
 use solana_transaction_builder_executor::{GroupOutcome, GroupStatus, RunConfig, RunReport, run};
-use solana_transaction_executor::{FeePolicy, TransactionExecutor};
+use solana_transaction_executor::{FeePolicy, FeeStrategy, PriorityLevel, TransactionExecutor};
 
 const ALL: [MessageVersion; 2] = [MessageVersion::Legacy, MessageVersion::V1];
 const SOL: u64 = 1_000_000_000;
@@ -241,6 +241,27 @@ async fn a_set_start_rate_is_paid_in_the_versions_unit() {
 }
 
 #[tokio::test]
+async fn a_dynamic_first_send_pays_the_network_rate() {
+    let world = world();
+    *world.chain.recent_fees.lock().unwrap() = vec![0, 5_000, 5_000];
+    let config = RunConfig {
+        fee: FeePolicy {
+            strategy: FeeStrategy::Dynamic {
+                level: PriorityLevel::Medium,
+            },
+            ..FeePolicy::default()
+        },
+        ..RunConfig::new(MessageVersion::V1)
+    };
+
+    let report = world.run(vec![world.pay(0).0], &config).await;
+
+    assert_eq!(landed(&report), 1, "{report:?}");
+    assert_eq!(world.sent().len(), 1);
+    assert_eq!(report.transactions[0].micro_lamports_per_cu, 5_000);
+}
+
+#[tokio::test]
 async fn a_heap_request_lands_with_its_heap() {
     for version in ALL {
         let world = world();
@@ -408,10 +429,7 @@ async fn a_repeated_group_id_refuses_the_whole_run() {
         let (first, to_first) = world.pay(0);
         let (other, to_other) = world.pay(1);
         let (second, to_second) = world.pay(2);
-        let second = Group {
-            id: first.id.clone(),
-            ..second
-        };
+        let second = group(first.id(), second.instructions().to_vec()).unwrap();
 
         let report = world
             .run(vec![first, other, second], &RunConfig::new(version))

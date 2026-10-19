@@ -118,19 +118,19 @@ pub async fn run(
     let mut report = RunReport::default();
     let mut order = HashMap::new();
     for (index, group) in groups.iter().enumerate() {
-        if order.insert(group.id.clone(), index).is_some() {
-            let reason = format!("repeated group id {}", group.id);
-            let ids: Vec<String> = groups.iter().map(|group| group.id.clone()).collect();
+        if order.insert(group.id().to_owned(), index).is_some() {
+            let reason = format!("repeated group id {}", group.id());
+            let ids: Vec<String> = groups.iter().map(|group| group.id().to_owned()).collect();
             report.set(&ids, GroupStatus::NotSent { reason });
             return report;
         }
     }
     let given: Vec<Pubkey> = signers.iter().map(|signer| signer.pubkey()).collect();
     let mut passing = Vec::new();
-    for mut group in groups {
+    for group in groups {
         if let Some(missing) = missing_signer(payer, &group, &given) {
             report.set(
-                &[group.id],
+                &[group.id().to_owned()],
                 GroupStatus::NotSent {
                     reason: format!("missing signer {missing}"),
                 },
@@ -138,13 +138,14 @@ pub async fn run(
             continue;
         }
         match simulate(executor, payer, &Batch::from(&group), config).await {
-            Ok(simulation) => {
-                group.compute_units = simulation
-                    .units_consumed
-                    .and_then(|units| u32::try_from(units).ok());
-                passing.push(group);
-            }
-            Err(status) => report.set(&[group.id], status),
+            Ok(simulation) => passing.push(
+                group.with_compute_units(
+                    simulation
+                        .units_consumed
+                        .and_then(|units| u32::try_from(units).ok()),
+                ),
+            ),
+            Err(status) => report.set(&[group.id().to_owned()], status),
         }
     }
     let (batches, errors) = pack(payer, &passing, config.version, &config.limits);
@@ -158,7 +159,7 @@ pub async fn run(
     }
     let by_id: HashMap<String, Group> = passing
         .into_iter()
-        .map(|group| (group.id.clone(), group))
+        .map(|group| (group.id().to_owned(), group))
         .collect();
     for batch in batches {
         let split = match simulate(executor, payer, &batch, config).await {
@@ -217,7 +218,7 @@ fn missing_signer(payer: &Pubkey, group: &Group, given: &[Pubkey]) -> Option<Pub
     std::iter::once(payer)
         .chain(
             group
-                .instructions
+                .instructions()
                 .iter()
                 .flat_map(|instruction| &instruction.accounts)
                 .filter(|account| account.is_signer)
@@ -285,7 +286,8 @@ async fn send(
         loaded_accounts_data_size_limit: Some(loaded_accounts_data_size_limit),
         heap_bytes: batch.heap_bytes,
     };
-    let first = config.fee.first();
+    let writable = writable_accounts(payer, batch);
+    let first = executor.first_rate(&config.fee, &writable).await;
     let planned = match compile(
         payer,
         &batch.instructions,
@@ -318,7 +320,6 @@ async fn send(
         return false;
     }
 
-    let writable = writable_accounts(payer, batch);
     let budget_ref = &budget;
     let writable_ref = &writable;
     let max_attempts = executor.transaction_executor_config.max_attempts;

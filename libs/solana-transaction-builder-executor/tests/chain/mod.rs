@@ -37,6 +37,7 @@ pub struct Chain {
     /// A send naming this account lands with `POISONED` although its simulation passed.
     pub poison: Mutex<Option<Pubkey>>,
     pub drop_sends: AtomicBool,
+    pub dropped_first_sends: AtomicUsize,
     pub block_height_fails: AtomicBool,
     block_height: AtomicU64,
     pub blockhash_reads: AtomicUsize,
@@ -57,6 +58,7 @@ impl Chain {
             landed: Mutex::new(HashMap::new()),
             poison: Mutex::new(None),
             drop_sends: AtomicBool::new(false),
+            dropped_first_sends: AtomicUsize::new(0),
             block_height_fails: AtomicBool::new(false),
             block_height: AtomicU64::new(0),
             blockhash_reads: AtomicUsize::new(0),
@@ -162,9 +164,15 @@ impl SendTransactionProvider for Chain {
             transaction.verify_with_results().iter().all(|valid| *valid),
             "a signature does not verify"
         );
-        self.sent.lock().unwrap().push(transaction.clone());
+        let index = {
+            let mut sent = self.sent.lock().unwrap();
+            sent.push(transaction.clone());
+            sent.len() - 1
+        };
         let signature = transaction.signatures[0];
-        if self.drop_sends.load(Ordering::SeqCst) {
+        if self.drop_sends.load(Ordering::SeqCst)
+            || index < self.dropped_first_sends.load(Ordering::SeqCst)
+        {
             return Ok(signature);
         }
         let poison = *self.poison.lock().unwrap();

@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use futures_util::stream;
 use log::{info, warn};
@@ -110,6 +107,7 @@ fn failed(error: impl ToString, logs: Vec<String>) -> GroupStatus {
 
 /// Groups must be independent: each is simulated alone against the state before the run.
 /// A batch whose failure is proven, in simulation or on chain, goes one group per transaction.
+/// A repeated group id refuses the whole run; the report keeps the order of `groups`.
 pub async fn run(
     executor: &TransactionExecutor,
     payer: &Pubkey,
@@ -118,14 +116,18 @@ pub async fn run(
     config: &RunConfig,
 ) -> RunReport {
     let mut report = RunReport::default();
+    let mut order = HashMap::new();
+    for (index, group) in groups.iter().enumerate() {
+        if order.insert(group.id.clone(), index).is_some() {
+            let reason = format!("repeated group id {}", group.id);
+            let ids: Vec<String> = groups.iter().map(|group| group.id.clone()).collect();
+            report.set(&ids, GroupStatus::NotSent { reason });
+            return report;
+        }
+    }
     let given: Vec<Pubkey> = signers.iter().map(|signer| signer.pubkey()).collect();
-    let mut ids = HashSet::new();
     let mut passing = Vec::new();
     for mut group in groups {
-        if !ids.insert(group.id.clone()) {
-            report.set(&[group.id], failed("duplicate group id", vec![]));
-            continue;
-        }
         if let Some(missing) = missing_signer(payer, &group, &given) {
             report.set(
                 &[group.id],
@@ -149,7 +151,8 @@ pub async fn run(
     for error in errors {
         let id = match &error {
             solana_transaction_builder::PackError::GroupTooLarge { id, .. }
-            | solana_transaction_builder::PackError::Budget { id, .. } => id.clone(),
+            | solana_transaction_builder::PackError::Budget { id, .. }
+            | solana_transaction_builder::PackError::Empty { id } => id.clone(),
         };
         report.set(&[id], failed(error, vec![]));
     }
@@ -206,6 +209,7 @@ pub async fn run(
             }
         }
     }
+    report.groups.sort_by_key(|outcome| order[&outcome.id]);
     report
 }
 
@@ -363,15 +367,25 @@ async fn send(
         } => {
             tx_report.signature = Some(*signature);
             // Without the expiry wait, an earlier attempt may still be live and land after a split.
-            split = !alone
-                && executor
-                    .transaction_executor_config
-                    .wait_for_blockhash_expiry_before_retry;
-            (!split).then(|| GroupStatus::Failed {
-                error: error.to_string(),
-                logs: vec![],
-                signature: Some(*signature),
-            })
+            let waited = executor
+                .transaction_executor_config
+                .wait_for_blockhash_expiry_before_retry;
+            split = !alone && waited;
+            let signatures = sent_signatures(&execution);
+            if split {
+                None
+            } else if !waited && signatures.len() > 1 {
+                Some(GroupStatus::Unknown {
+                    reason: format!("{signature} failed with {error}; an earlier attempt may land"),
+                    signatures,
+                })
+            } else {
+                Some(GroupStatus::Failed {
+                    error: error.to_string(),
+                    logs: vec![],
+                    signature: Some(*signature),
+                })
+            }
         }
         Outcome::NotLanded(NotLanded::Refused { error, logs }) => {
             split = !alone;
@@ -390,12 +404,7 @@ async fn send(
         }
         Outcome::Unknown { reason } => Some(GroupStatus::Unknown {
             reason: reason.clone(),
-            signatures: execution
-                .attempts
-                .iter()
-                .filter(|attempt| attempt.sent)
-                .map(|attempt| attempt.signature)
-                .collect(),
+            signatures: sent_signatures(&execution),
         }),
     };
     if let Some(status) = status {
@@ -404,6 +413,15 @@ async fn send(
     tx_report.execution = Some(execution);
     report.transactions.push(tx_report);
     split
+}
+
+fn sent_signatures(execution: &Execution) -> Vec<Signature> {
+    execution
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.sent)
+        .map(|attempt| attempt.signature)
+        .collect()
 }
 
 async fn build(

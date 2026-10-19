@@ -11,7 +11,7 @@ use solana_signer::Signer;
 use solana_system_interface::instruction::transfer;
 use solana_transaction::versioned::VersionedTransaction;
 use solana_transaction_builder::{Group, MessageVersion, group};
-use solana_transaction_builder_executor::{GroupStatus, RunConfig, RunReport, run};
+use solana_transaction_builder_executor::{GroupOutcome, GroupStatus, RunConfig, RunReport, run};
 use solana_transaction_executor::{FeePolicy, TransactionExecutor};
 
 const ALL: [MessageVersion; 2] = [MessageVersion::Legacy, MessageVersion::V1];
@@ -154,6 +154,15 @@ async fn a_group_that_fails_alone_is_reported_and_the_rest_land() {
         assert_eq!(
             report.transactions[0].group_ids,
             vec!["0", "1"],
+            "{version:?}"
+        );
+        assert_eq!(
+            report
+                .groups
+                .iter()
+                .map(|outcome| outcome.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["0", "broke", "1"],
             "{version:?}"
         );
     }
@@ -393,30 +402,39 @@ async fn a_batch_the_chain_never_takes_did_not_land_after_every_attempt() {
 }
 
 #[tokio::test]
-async fn a_duplicate_group_id_is_refused_and_never_sent() {
+async fn a_repeated_group_id_refuses_the_whole_run() {
     for version in ALL {
         let world = world();
-        let (first, kept) = world.pay(0);
-        let (second, dropped) = world.pay(1);
+        let (first, to_first) = world.pay(0);
+        let (other, to_other) = world.pay(1);
+        let (second, to_second) = world.pay(2);
         let second = Group {
             id: first.id.clone(),
             ..second
         };
 
         let report = world
-            .run(vec![first, second], &RunConfig::new(version))
+            .run(vec![first, other, second], &RunConfig::new(version))
             .await;
 
-        assert_eq!(report.groups.len(), 2, "{version:?}");
-        assert_eq!(landed(&report), 1, "{version:?} {report:?}");
-        assert!(
-            report.groups.iter().any(|outcome| matches!(&outcome.status, GroupStatus::Failed { error, signature: None, .. } if error == "duplicate group id")),
-            "{version:?} {report:?}"
+        let refused = GroupStatus::NotSent {
+            reason: "repeated group id 0".into(),
+        };
+        assert_eq!(
+            report.groups,
+            ["0", "1", "0"]
+                .map(|id| GroupOutcome {
+                    id: id.into(),
+                    status: refused.clone(),
+                })
+                .to_vec(),
+            "{version:?}"
         );
-        assert_eq!(report.transactions.len(), 1, "{version:?}");
-        assert_eq!(world.sent().len(), 1, "{version:?}");
-        assert_eq!(world.chain.balance(&kept), AMOUNT, "{version:?}");
-        assert_eq!(world.chain.balance(&dropped), 0, "{version:?}");
+        assert!(report.transactions.is_empty(), "{version:?}");
+        assert!(world.sent().is_empty(), "{version:?}");
+        for to in [to_first, to_other, to_second] {
+            assert_eq!(world.chain.balance(&to), 0, "{version:?}");
+        }
     }
 }
 
@@ -572,6 +590,36 @@ async fn a_batch_that_lands_with_an_error_is_not_split_without_the_expiry_wait()
         assert_eq!(report.transactions.len(), 1, "{version:?}");
         assert_eq!(world.sent().len(), 1, "{version:?}");
         assert_eq!(world.chain.balance(&first), 0, "{version:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_failed_landing_with_an_earlier_live_attempt_is_unknown_without_the_expiry_wait() {
+    for version in ALL {
+        let world = world();
+        let (bad, poisoned) = world.pay(0);
+        *world.chain.poison.lock().unwrap() = Some(poisoned);
+        world.chain.dropped_first_sends.store(1, Ordering::SeqCst);
+        let mut executor = world.chain.executor();
+        executor
+            .transaction_executor_config
+            .wait_for_blockhash_expiry_before_retry = false;
+
+        let report = world
+            .run_on(&executor, vec![bad], &RunConfig::new(version))
+            .await;
+
+        let sent: Vec<_> = world
+            .sent()
+            .iter()
+            .map(|transaction| transaction.signatures[0])
+            .collect();
+        assert_eq!(sent.len(), 2, "{version:?} {report:?}");
+        assert_ne!(sent[0], sent[1], "{version:?}");
+        assert!(
+            matches!(status(&report, "0"), GroupStatus::Unknown { signatures, .. } if *signatures == sent),
+            "{version:?} {report:?}"
+        );
     }
 }
 

@@ -32,6 +32,8 @@ pub enum PackError {
     GroupTooLarge { id: String, reason: String },
     #[error("Group {id} has an unusable Compute Budget instruction: {reason}")]
     Budget { id: String, reason: String },
+    #[error("Group {id} has no instruction besides Compute Budget ones")]
+    Empty { id: String },
 }
 
 /// A group's own limit and price are dropped: simulation and the fee policy set them per batch.
@@ -76,6 +78,9 @@ pub fn group(id: impl Into<String>, instructions: Vec<Instruction>) -> Result<Gr
             }
             heap_bytes = Some(bytes);
         }
+    }
+    if kept.is_empty() {
+        return Err(PackError::Empty { id });
     }
     Ok(Group {
         id,
@@ -299,16 +304,19 @@ mod tests {
     }
 
     #[test]
-    fn a_batch_closes_before_the_v1_instruction_cap() {
+    fn a_batch_closes_before_the_instruction_cap() {
         let program = Pubkey::new_unique();
         let groups: Vec<Group> = (0..10)
             .map(|id| of(id, (0..10).map(|_| noop(program, vec![], 0)).collect()))
             .collect();
-        let batches = pack_checked(&groups, MessageVersion::V1);
-        assert_eq!(
-            ids(&batches).iter().map(Vec::len).collect::<Vec<_>>(),
-            vec![6, 4]
-        );
+        for version in [MessageVersion::Legacy, MessageVersion::V1] {
+            let batches = pack_checked(&groups, version);
+            assert_eq!(
+                ids(&batches).iter().map(Vec::len).collect::<Vec<_>>(),
+                vec![6, 4],
+                "{version:?}"
+            );
+        }
     }
 
     #[test]
@@ -495,6 +503,22 @@ mod tests {
             vec![ComputeBudgetInstruction::request_heap_frame(1_000)],
         );
         assert!(matches!(bad_heap, Err(PackError::Budget { .. })));
+    }
+
+    #[test]
+    fn a_group_with_nothing_but_budget_instructions_is_refused() {
+        let empty = PackError::Empty { id: "g".into() };
+        assert_eq!(group("g", vec![]), Err(empty.clone()));
+        assert_eq!(
+            group(
+                "g",
+                vec![
+                    ComputeBudgetInstruction::set_compute_unit_limit(10),
+                    ComputeBudgetInstruction::request_heap_frame(64 * 1024),
+                ],
+            ),
+            Err(empty)
+        );
     }
 
     #[test]

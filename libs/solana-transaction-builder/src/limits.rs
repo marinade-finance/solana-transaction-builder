@@ -20,7 +20,8 @@ impl Limits {
             MessageVersion::Legacy => Self {
                 max_bytes: PACKET_DATA_SIZE,
                 max_addresses: MAX_TX_ACCOUNT_LOCKS,
-                max_instructions: usize::MAX,
+                // Agave's instruction trace holds 64 entries, the same cap as v1.
+                max_instructions: usize::from(v1::MAX_INSTRUCTIONS),
                 max_signatures: usize::from(u8::MAX),
                 max_compute_units: crate::DEFAULT_COMPUTE_UNIT_LIMIT,
                 margin_bps: 1_000,

@@ -10,10 +10,10 @@ The `solana-to-4.x` line uses the Solana 4.x crates; `solana-3.0.x` keeps the ol
 
 - **`Group`** — instructions that land in one transaction or not at all. `group()` lifts a
   caller's Compute Budget instructions: a heap request stays with the group, a limit or a price is
-  dropped because the run sets them per transaction.
+  dropped because the run sets them per transaction. A group with no other instruction is refused.
 - **`MessageVersion`** — `Legacy` or `V1`. `Limits::of` gives its caps: legacy 1,232 bytes and 128
-  account locks; v1 4,096 bytes, 64 addresses, 64 instructions and 12 signatures; both 1.4M compute
-  units, with a 10% margin.
+  account locks; v1 4,096 bytes, 64 addresses and 12 signatures; both 64 instructions and 1.4M
+  compute units, with a 10% margin.
 - **`Budget`** — compute-unit limit, priority rate (micro-lamports per CU), loaded-accounts limit
   and heap. Legacy places them as Compute Budget instructions ahead of the caller's; v1 places them
   in the message config, pays the rate as a lamport total over the limit, and always sets the
@@ -29,7 +29,8 @@ The `solana-to-4.x` line uses the Solana 4.x crates; `solana-3.0.x` keeps the ol
 The groups must be independent: each is simulated alone against the state before the run, so a
 group that spends what an earlier group creates fails its simulation.
 
-1. Refuse a repeated group id as `Failed` and a group whose signer is not given as `NotSent`.
+1. Refuse the whole run as `NotSent` when a group id repeats, and a group whose signer is not given
+   as `NotSent`.
 2. Simulate each group alone; a failing group is reported `Failed` with its logs.
 3. Pack the rest.
 4. Simulate each batch and set its compute and loaded-accounts limits to the measured values plus
@@ -40,11 +41,12 @@ group that spends what an earlier group creates fails its simulation.
    transaction. A batch that landed with an error splits only when the executor waits for each
    blockhash to expire before a retry. A batch that is `Unknown` is never sent again.
 
-`RunReport` gives each group's status and each transaction's bytes, addresses, consumed units,
-limits, rate, fee, attempts and the executor's whole `Execution`:
+`RunReport` gives each group's status, in the order of the input groups, and each transaction's
+bytes, addresses, consumed units, limits, rate, fee, attempts and the executor's whole `Execution`:
 
 - **`Landed`** — the signature and its slot.
-- **`Failed`** — the error and logs, with the landed signature when it failed on chain.
+- **`Failed`** — the error and logs, with the landed signature when it failed on chain. Without the
+  expiry wait, a failed landing after several sent attempts is `Unknown` instead.
 - **`NotSent`** — no attempt left the process, for example an RPC call failed; the caller may plan
   the group again.
 - **`NotLanded`** — every attempt expired unfound; the caller may plan the group again.

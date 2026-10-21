@@ -22,7 +22,7 @@ solana-message = { version = "~4.6.0", features = ["wincode"] }
 solana-packet = "4.2"
 solana-pubkey = "4.2"
 solana-signature = "3.4"
-solana-signer = "3"
+solana-signer = "4"
 solana-system-interface = { version = "3", features = ["bincode"] }
 solana-transaction = { version = "~4.3.0", features = ["wincode"] }
 solana-transaction-builder = { path = "./libs/solana-transaction-builder" }

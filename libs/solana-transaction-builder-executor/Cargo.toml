@@ -19,7 +19,7 @@ solana-transaction-executor = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
-litesvm = "=0.18.0"
+litesvm = "=0.18.1"
 solana-client = "~4.3.2"
 solana-commitment-config = "3.1"
 solana-compute-budget-interface = { workspace = true }

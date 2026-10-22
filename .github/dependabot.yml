@@ -26,3 +26,7 @@ updates:
     directory: '/'
     schedule:
       interval: 'monthly'
+    ignore:
+      # solana majors must move together with solana-client, the interface crates and litesvm
+      - dependency-name: 'solana-*'
+        update-types: ['version-update:semver-major']

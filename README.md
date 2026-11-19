@@ -41,9 +41,9 @@ group that spends what another group creates may fail its simulation.
 5. Send through the executor, up to `RunConfig::max_in_flight` batches at once (8 by default), at
    most `max_attempts` builds per batch. The first attempt is marked `simulated`, so the executor
    does not simulate it again; a re-signed attempt, and a group sent alone after its re-packed
-   batch failed, are simulated before the send. Rate limit, rebroadcast and the blockhash cache
+   batch failed, are simulated before the send. Rate limit, rebroadcast and the block height cache
    are the executor's `TransactionExecutorConfig` knobs. A group whose instructions equal an
-   earlier group's is `NotSent`: within one cached blockhash both would be one transaction. The first attempt pays the fee
+   earlier group's is `NotSent`: batches built in parallel can share a blockhash and be one transaction. The first attempt pays the fee
    policy's start rate, 0 by default, or the network's rate under `FeeStrategy::Dynamic`; a retry
    rebuilds with a fresh blockhash and the next rate.
 6. A batch whose failure is proven, or for which nothing was sent, goes again one group per

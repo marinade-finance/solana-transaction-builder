@@ -182,7 +182,7 @@ pub async fn run(
 
 type InstructionsKey = Vec<(Pubkey, Vec<(Pubkey, bool, bool)>, Vec<u8>)>;
 
-/// Within one cached blockhash, identical instructions compile to one transaction.
+/// Parallel batches can share a blockhash, and identical instructions then are one transaction.
 fn drop_identical(groups: Vec<Group>, report: &mut RunReport) -> Vec<Group> {
     let mut first: HashMap<InstructionsKey, String> = HashMap::new();
     let mut kept = Vec::new();

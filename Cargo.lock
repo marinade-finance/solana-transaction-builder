@@ -5896,7 +5896,7 @@ dependencies = [
 [[package]]
 name = "solana-transaction-executor"
 version = "0.0.1"
-source = "git+https://github.com/marinade-finance/solana-transaction-executor?branch=tx-sender-perf-v1#b186df265fec197989c9e79d8eb647243a96854b"
+source = "git+https://github.com/marinade-finance/solana-transaction-executor?branch=tx-sender-perf-v1#108964e6489f0b479d021f53f8b53d996022ef5d"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -95,6 +95,20 @@ impl RunReport {
             status: status.clone(),
         }));
     }
+
+    fn apply_sent(&mut self, ids: &[String], sent: Sent) -> bool {
+        if let Some(status) = sent.status {
+            self.set(ids, status);
+        }
+        self.transactions.extend(sent.transaction);
+        sent.split
+    }
+}
+
+struct Sent {
+    split: bool,
+    status: Option<GroupStatus>,
+    transaction: Option<TxReport>,
 }
 
 fn failed(error: impl ToString, logs: Vec<String>) -> GroupStatus {
@@ -164,16 +178,8 @@ pub async fn run(
     for batch in batches {
         let split = match simulate(executor, payer, &batch, config).await {
             Ok(simulation) => {
-                send(
-                    executor,
-                    payer,
-                    &batch,
-                    &simulation,
-                    signers,
-                    config,
-                    &mut report,
-                )
-                .await
+                let sent = send(executor, payer, &batch, &simulation, signers, config).await;
+                report.apply_sent(&batch.group_ids, sent)
             }
             Err(GroupStatus::Failed { error, .. }) if batch.group_ids.len() > 1 => {
                 warn!(
@@ -195,16 +201,8 @@ pub async fn run(
             let single = Batch::from(&by_id[id]);
             match simulate(executor, payer, &single, config).await {
                 Ok(simulation) => {
-                    send(
-                        executor,
-                        payer,
-                        &single,
-                        &simulation,
-                        signers,
-                        config,
-                        &mut report,
-                    )
-                    .await;
+                    let sent = send(executor, payer, &single, &simulation, signers, config).await;
+                    report.apply_sent(&single.group_ids, sent);
                 }
                 Err(status) => report.set(&single.group_ids, status),
             }
@@ -254,7 +252,7 @@ async fn simulate(
     }
 }
 
-/// Reports the batch, or returns true when its groups should be sent one by one instead.
+/// The batch's status, or `split` when its groups should be sent one by one instead.
 async fn send(
     executor: &TransactionExecutor,
     payer: &Pubkey,
@@ -262,8 +260,7 @@ async fn send(
     simulation: &Simulation,
     signers: &[Arc<dyn Signer + Send + Sync>],
     config: &RunConfig,
-    report: &mut RunReport,
-) -> bool {
+) -> Sent {
     let limits = &config.limits;
     let compute_unit_limit =
         simulation
@@ -297,8 +294,11 @@ async fn send(
     ) {
         Ok(transaction) => transaction,
         Err(error) => {
-            report.set(&batch.group_ids, failed(error, vec![]));
-            return false;
+            return Sent {
+                split: false,
+                status: Some(failed(error, vec![])),
+                transaction: None,
+            };
         }
     };
     let mut tx_report = TxReport {
@@ -315,9 +315,11 @@ async fn send(
         execution: None,
     };
     if config.dry_run {
-        report.set(&batch.group_ids, GroupStatus::Planned);
-        report.transactions.push(tx_report);
-        return false;
+        return Sent {
+            split: false,
+            status: Some(GroupStatus::Planned),
+            transaction: Some(tx_report),
+        };
     }
 
     let budget_ref = &budget;
@@ -408,12 +410,12 @@ async fn send(
             signatures: sent_signatures(&execution),
         }),
     };
-    if let Some(status) = status {
-        report.set(&batch.group_ids, status);
-    }
     tx_report.execution = Some(execution);
-    report.transactions.push(tx_report);
-    split
+    Sent {
+        split,
+        status,
+        transaction: Some(tx_report),
+    }
 }
 
 fn sent_signatures(execution: &Execution) -> Vec<Signature> {

@@ -51,6 +51,8 @@ pub struct Chain {
     in_flight: Mutex<HashSet<Signature>>,
     /// The most signatures sent and not yet seen by a status read.
     pub max_in_flight_seen: AtomicUsize,
+    /// Size of every status call, history reads excluded.
+    pub status_calls: Mutex<Vec<usize>>,
 }
 
 pub const POISONED: TransactionError =
@@ -76,6 +78,7 @@ impl Chain {
             signed_simulations: AtomicUsize::new(0),
             in_flight: Mutex::new(HashSet::new()),
             max_in_flight_seen: AtomicUsize::new(0),
+            status_calls: Mutex::new(Vec::new()),
         })
     }
 
@@ -137,6 +140,32 @@ impl Chain {
                 post_token_balances: None,
                 loaded_addresses: None,
             },
+        })
+    }
+
+    fn statuses(&self, signatures: &[Signature]) -> RpcResult<Vec<Option<TransactionStatus>>> {
+        let landed = self.landed.lock().unwrap();
+        self.in_flight
+            .lock()
+            .unwrap()
+            .retain(|signature| !landed.contains_key(signature));
+        Ok(Response {
+            context: RpcResponseContext {
+                slot: 1,
+                api_version: None,
+            },
+            value: signatures
+                .iter()
+                .map(|signature| {
+                    landed.get(signature).map(|result| TransactionStatus {
+                        slot: 1,
+                        confirmations: None,
+                        status: result.clone(),
+                        err: result.clone().err(),
+                        confirmation_status: Some(TransactionConfirmationStatus::Finalized),
+                    })
+                })
+                .collect(),
         })
     }
 }
@@ -221,36 +250,15 @@ impl SignatureStatusesProvider for Chain {
         &self,
         signatures: &[Signature],
     ) -> RpcResult<Vec<Option<TransactionStatus>>> {
-        let landed = self.landed.lock().unwrap();
-        self.in_flight
-            .lock()
-            .unwrap()
-            .retain(|signature| !landed.contains_key(signature));
-        Ok(Response {
-            context: RpcResponseContext {
-                slot: 1,
-                api_version: None,
-            },
-            value: signatures
-                .iter()
-                .map(|signature| {
-                    landed.get(signature).map(|result| TransactionStatus {
-                        slot: 1,
-                        confirmations: None,
-                        status: result.clone(),
-                        err: result.clone().err(),
-                        confirmation_status: Some(TransactionConfirmationStatus::Finalized),
-                    })
-                })
-                .collect(),
-        })
+        self.status_calls.lock().unwrap().push(signatures.len());
+        self.statuses(signatures)
     }
 
     async fn get_signature_statuses_with_history(
         &self,
         signatures: &[Signature],
     ) -> RpcResult<Vec<Option<TransactionStatus>>> {
-        self.get_signature_statuses(signatures).await
+        self.statuses(signatures)
     }
 
     async fn latest_blockhash(&self) -> anyhow::Result<(Hash, u64)> {

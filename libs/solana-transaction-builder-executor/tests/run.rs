@@ -913,3 +913,57 @@ async fn an_unknown_batch_is_not_retried() {
         assert_eq!(report.transactions.len(), 1, "{version:?}");
     }
 }
+
+const CLAIMS: usize = 11_155;
+const CLAIMS_PER_TX: usize = 6;
+
+async fn claims_run(max_in_flight: usize) -> (World, RunReport, std::time::Duration) {
+    let world = world();
+    world.chain.airdrop(&world.payer.pubkey(), 20 * SOL);
+    let groups = (0..CLAIMS).map(|id| world.pay(id).0).collect();
+    let mut config = RunConfig::new(MessageVersion::V1);
+    config.limits.max_instructions = CLAIMS_PER_TX;
+    config.max_in_flight = max_in_flight;
+    let start = std::time::Instant::now();
+    let report = world.run(groups, &config).await;
+    (world, report, start.elapsed())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn eleven_thousand_claims_cost_one_simulation_per_batch() {
+    let status_interval = world()
+        .chain
+        .executor()
+        .transaction_executor_config
+        .signature_status_check_interval;
+    for max_in_flight in [8, 32] {
+        let (world, report, elapsed) = claims_run(max_in_flight).await;
+        let batches = CLAIMS.div_ceil(CLAIMS_PER_TX);
+        let status_calls = world.chain.status_calls.lock().unwrap().clone();
+        let unsigned = world.chain.unsigned_simulations.load(Ordering::SeqCst);
+        let signed = world.chain.signed_simulations.load(Ordering::SeqCst);
+        let in_flight = world.chain.max_in_flight_seen.load(Ordering::SeqCst);
+        println!(
+            "max_in_flight {max_in_flight}: {} txs, {unsigned} unsigned and {signed} signed \
+             simulations, {} status calls in {elapsed:?}, {in_flight} in flight at most",
+            report.transactions.len(),
+            status_calls.len()
+        );
+
+        assert_eq!(landed(&report), CLAIMS, "{max_in_flight}");
+        assert_eq!(report.transactions.len(), batches);
+        assert_eq!(unsigned, batches);
+        assert_eq!(signed, 0);
+        assert!(
+            status_calls.iter().all(|size| *size <= 256),
+            "{status_calls:?}"
+        );
+        let ticks = elapsed.as_millis() / status_interval.as_millis();
+        assert!(
+            status_calls.len() as u128 <= ticks + 2,
+            "{} status calls in {ticks} intervals",
+            status_calls.len()
+        );
+        assert!(in_flight <= max_in_flight, "{in_flight}");
+    }
+}

@@ -119,8 +119,9 @@ fn failed(error: impl ToString, logs: Vec<String>) -> GroupStatus {
     }
 }
 
-/// Groups must be independent: each is simulated alone against the state before the run.
-/// A batch whose failure is proven, in simulation or on chain, goes one group per transaction.
+/// Groups are packed first and each batch is simulated once. A batch that fails simulation has
+/// its groups simulated alone: the failing ones are reported, the rest are packed again.
+/// A batch whose failure is proven on chain goes one group per transaction.
 /// A repeated group id refuses the whole run; the report keeps the order of `groups`.
 pub async fn run(
     executor: &TransactionExecutor,
@@ -140,29 +141,39 @@ pub async fn run(
         }
     }
     let given: Vec<Pubkey> = signers.iter().map(|signer| signer.pubkey()).collect();
-    let mut passing = Vec::new();
+    let mut signed = Vec::new();
     for group in groups {
-        if let Some(missing) = missing_signer(payer, &group, &given) {
-            report.set(
+        match missing_signer(payer, &group, &given) {
+            Some(missing) => report.set(
                 &[group.id().to_owned()],
                 GroupStatus::NotSent {
                     reason: format!("missing signer {missing}"),
                 },
-            );
-            continue;
-        }
-        match simulate(executor, payer, &Batch::from(&group), config).await {
-            Ok(simulation) => passing.push(
-                group.with_compute_units(
-                    simulation
-                        .units_consumed
-                        .and_then(|units| u32::try_from(units).ok()),
-                ),
             ),
-            Err(status) => report.set(&[group.id().to_owned()], status),
+            None => signed.push(group),
         }
     }
-    let (batches, errors) = pack(payer, &passing, config.version, &config.limits);
+    let batches = pack_reporting(payer, &signed, config, &mut report);
+    let by_id: HashMap<String, Group> = signed
+        .into_iter()
+        .map(|group| (group.id().to_owned(), group))
+        .collect();
+    for batch in batches {
+        let batch_report = run_batch(executor, payer, batch, &by_id, signers, config).await;
+        report.groups.extend(batch_report.groups);
+        report.transactions.extend(batch_report.transactions);
+    }
+    report.groups.sort_by_key(|outcome| order[&outcome.id]);
+    report
+}
+
+fn pack_reporting(
+    payer: &Pubkey,
+    groups: &[Group],
+    config: &RunConfig,
+    report: &mut RunReport,
+) -> Vec<Batch> {
+    let (batches, errors) = pack(payer, groups, config.version, &config.limits);
     for error in errors {
         let id = match &error {
             solana_transaction_builder::PackError::GroupTooLarge { id, .. }
@@ -171,45 +182,106 @@ pub async fn run(
         };
         report.set(&[id], failed(error, vec![]));
     }
-    let by_id: HashMap<String, Group> = passing
-        .into_iter()
-        .map(|group| (group.id().to_owned(), group))
-        .collect();
-    for batch in batches {
-        let split = match simulate(executor, payer, &batch, config).await {
-            Ok(simulation) => {
-                let sent = send(executor, payer, &batch, &simulation, signers, config).await;
-                report.apply_sent(&batch.group_ids, sent)
+    batches
+}
+
+async fn run_batch(
+    executor: &TransactionExecutor,
+    payer: &Pubkey,
+    batch: Batch,
+    by_id: &HashMap<String, Group>,
+    signers: &[Arc<dyn Signer + Send + Sync>],
+    config: &RunConfig,
+) -> RunReport {
+    let mut report = RunReport::default();
+    match simulate(executor, payer, &batch, config).await {
+        Ok(simulation) => {
+            let sent = send(executor, payer, &batch, &simulation, signers, config).await;
+            if report.apply_sent(&batch.group_ids, sent) {
+                info!("Sending the groups of {:?} one by one", batch.group_ids);
+                for id in &batch.group_ids {
+                    let single = Batch::from(&by_id[id]);
+                    match simulate(executor, payer, &single, config).await {
+                        Ok(simulation) => {
+                            let sent =
+                                send(executor, payer, &single, &simulation, signers, config).await;
+                            report.apply_sent(&single.group_ids, sent);
+                        }
+                        Err(status) => report.set(&single.group_ids, status),
+                    }
+                }
             }
-            Err(GroupStatus::Failed { error, .. }) if batch.group_ids.len() > 1 => {
+        }
+        Err(GroupStatus::Failed { error, .. }) if batch.group_ids.len() > 1 => {
+            warn!(
+                "Batch {:?} failed in simulation ({error}); simulating its groups alone",
+                batch.group_ids
+            );
+            isolate(executor, payer, &batch, by_id, signers, config, &mut report).await;
+        }
+        Err(status) => report.set(&batch.group_ids, status),
+    }
+    report
+}
+
+async fn isolate(
+    executor: &TransactionExecutor,
+    payer: &Pubkey,
+    batch: &Batch,
+    by_id: &HashMap<String, Group>,
+    signers: &[Arc<dyn Signer + Send + Sync>],
+    config: &RunConfig,
+    report: &mut RunReport,
+) {
+    let mut passing = Vec::new();
+    let mut held = HashMap::new();
+    for id in &batch.group_ids {
+        let group = &by_id[id];
+        match simulate(executor, payer, &Batch::from(group), config).await {
+            Ok(simulation) => {
+                let units = simulation
+                    .units_consumed
+                    .and_then(|units| u32::try_from(units).ok());
+                passing.push(group.clone().with_compute_units(units));
+                held.insert(id.clone(), simulation);
+            }
+            Err(status) => report.set(std::slice::from_ref(id), status),
+        }
+    }
+    let send_alone = async |id: &String, report: &mut RunReport| {
+        let single = Batch::from(&by_id[id]);
+        let sent = send(executor, payer, &single, &held[id], signers, config).await;
+        report.apply_sent(&single.group_ids, sent);
+    };
+    for repacked in pack_reporting(payer, &passing, config, report) {
+        if let [id] = repacked.group_ids.as_slice() {
+            send_alone(id, report).await;
+            continue;
+        }
+        let split = match simulate(executor, payer, &repacked, config).await {
+            Ok(simulation) => {
+                let sent = send(executor, payer, &repacked, &simulation, signers, config).await;
+                report.apply_sent(&repacked.group_ids, sent)
+            }
+            Err(GroupStatus::Failed { error, .. }) => {
                 warn!(
                     "Batch {:?} failed together in simulation ({error})",
-                    batch.group_ids
+                    repacked.group_ids
                 );
                 true
             }
             Err(status) => {
-                report.set(&batch.group_ids, status);
+                report.set(&repacked.group_ids, status);
                 false
             }
         };
-        if !split {
-            continue;
-        }
-        info!("Sending the groups of {:?} one by one", batch.group_ids);
-        for id in &batch.group_ids {
-            let single = Batch::from(&by_id[id]);
-            match simulate(executor, payer, &single, config).await {
-                Ok(simulation) => {
-                    let sent = send(executor, payer, &single, &simulation, signers, config).await;
-                    report.apply_sent(&single.group_ids, sent);
-                }
-                Err(status) => report.set(&single.group_ids, status),
+        if split {
+            info!("Sending the groups of {:?} one by one", repacked.group_ids);
+            for id in &repacked.group_ids {
+                send_alone(id, report).await;
             }
         }
     }
-    report.groups.sort_by_key(|outcome| order[&outcome.id]);
-    report
 }
 
 fn missing_signer(payer: &Pubkey, group: &Group, given: &[Pubkey]) -> Option<Pubkey> {

@@ -169,6 +169,126 @@ async fn a_group_that_fails_alone_is_reported_and_the_rest_land() {
 }
 
 #[tokio::test]
+async fn a_passing_batch_is_simulated_once() {
+    for version in ALL {
+        let world = world();
+        let groups = (0..3).map(|id| world.pay(id).0).collect();
+
+        let report = world.run(groups, &RunConfig::new(version)).await;
+
+        assert_eq!(landed(&report), 3, "{version:?} {report:?}");
+        assert_eq!(report.transactions.len(), 1, "{version:?}");
+        assert_eq!(
+            world.chain.unsigned_simulations.load(Ordering::SeqCst),
+            1,
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_failing_group_is_isolated_and_the_rest_are_repacked() {
+    for version in ALL {
+        let world = world();
+        let broke = group(
+            "broke",
+            vec![transfer(
+                &world.payer.pubkey(),
+                &Pubkey::new_unique(),
+                100 * SOL,
+            )],
+        )
+        .unwrap();
+        let groups = vec![world.pay(0).0, broke, world.pay(1).0];
+
+        let report = world.run(groups, &RunConfig::new(version)).await;
+
+        assert!(
+            matches!(status(&report, "broke"), GroupStatus::Failed { .. }),
+            "{version:?}"
+        );
+        assert_eq!(landed(&report), 2, "{version:?} {report:?}");
+        assert_eq!(report.transactions.len(), 1, "{version:?}");
+        assert_eq!(report.transactions[0].group_ids, vec!["0", "1"]);
+        assert_eq!(
+            world.chain.unsigned_simulations.load(Ordering::SeqCst),
+            1 + 3 + 1,
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn groups_that_only_fail_together_go_one_per_transaction() {
+    for version in ALL {
+        let world = world();
+        let spender = Arc::new(Keypair::new());
+        world.chain.airdrop(&spender.pubkey(), SOL);
+        let spend = |id: &str| {
+            group(
+                id,
+                vec![transfer(
+                    &spender.pubkey(),
+                    &Pubkey::new_unique(),
+                    SOL / 10 * 6,
+                )],
+            )
+            .unwrap()
+        };
+        let signers: Vec<Arc<dyn Signer + Send + Sync>> =
+            vec![world.payer.clone(), spender.clone()];
+
+        let report = run(
+            &world.chain.executor(),
+            &world.payer.pubkey(),
+            vec![spend("a"), spend("b")],
+            &signers,
+            &RunConfig::new(version),
+        )
+        .await;
+
+        assert!(
+            matches!(status(&report, "a"), GroupStatus::Landed { .. }),
+            "{version:?} {report:?}"
+        );
+        assert!(
+            matches!(status(&report, "b"), GroupStatus::Failed { .. }),
+            "{version:?} {report:?}"
+        );
+        assert_eq!(report.transactions.len(), 2, "{version:?}");
+        assert_eq!(world.sent().len(), 1, "{version:?}");
+        assert_eq!(
+            world.chain.unsigned_simulations.load(Ordering::SeqCst),
+            1 + 2 + 1,
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_batch_over_the_compute_cap_is_repacked_under_it() {
+    for version in ALL {
+        let probe = world();
+        let one = probe
+            .run(vec![probe.pay(0).0], &RunConfig::new(version))
+            .await
+            .transactions[0]
+            .compute_units_consumed;
+        let world = world();
+        let mut config = RunConfig::new(version);
+        config.limits.max_compute_units = u32::try_from(one).unwrap() + 10;
+
+        let report = world
+            .run((0..3).map(|id| world.pay(id).0).collect(), &config)
+            .await;
+
+        assert_eq!(landed(&report), 3, "{version:?} {report:?}");
+        assert_eq!(report.transactions.len(), 3, "{version:?}");
+        assert_eq!(world.sent().len(), 3, "{version:?}");
+    }
+}
+
+#[tokio::test]
 async fn the_compute_limit_is_the_simulated_units_with_the_margin() {
     for version in ALL {
         let world = world();

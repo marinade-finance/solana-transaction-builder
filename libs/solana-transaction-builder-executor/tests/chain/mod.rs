@@ -46,6 +46,8 @@ pub struct Chain {
     pub simulation_rpc_fails: AtomicBool,
     pub hide_units: AtomicBool,
     pub recent_fees: Mutex<Vec<u64>>,
+    pub unsigned_simulations: AtomicUsize,
+    pub signed_simulations: AtomicUsize,
 }
 
 pub const POISONED: TransactionError =
@@ -67,6 +69,8 @@ impl Chain {
             simulation_rpc_fails: AtomicBool::new(false),
             hide_units: AtomicBool::new(false),
             recent_fees: Mutex::new(Vec::new()),
+            unsigned_simulations: AtomicUsize::new(0),
+            signed_simulations: AtomicUsize::new(0),
         })
     }
 
@@ -135,6 +139,7 @@ impl SimulateTransactionProvider for Chain {
         &self,
         transaction: &VersionedTransaction,
     ) -> RpcResult<RpcSimulateTransactionResult> {
+        self.signed_simulations.fetch_add(1, Ordering::SeqCst);
         self.simulate(transaction.clone())
     }
 
@@ -142,6 +147,7 @@ impl SimulateTransactionProvider for Chain {
         &self,
         transaction: &VersionedTransaction,
     ) -> RpcResult<RpcSimulateTransactionResult> {
+        self.unsigned_simulations.fetch_add(1, Ordering::SeqCst);
         if self.simulation_rpc_fails.load(Ordering::SeqCst) {
             return Err(ClientErrorKind::Custom(
                 "error sending request for url (https://rpc.example.com/?api-key=SECRET)".into(),

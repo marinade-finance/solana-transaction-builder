@@ -208,7 +208,7 @@ async fn run_batch(
     let mut report = RunReport::default();
     match simulate(executor, payer, &batch, config).await {
         Ok(simulation) => {
-            let sent = send(executor, payer, &batch, &simulation, signers, config).await;
+            let sent = send(executor, payer, &batch, &simulation, signers, config, true).await;
             if report.apply_sent(&batch.group_ids, sent) {
                 info!("Sending the groups of {:?} one by one", batch.group_ids);
                 for id in &batch.group_ids {
@@ -216,7 +216,8 @@ async fn run_batch(
                     match simulate(executor, payer, &single, config).await {
                         Ok(simulation) => {
                             let sent =
-                                send(executor, payer, &single, &simulation, signers, config).await;
+                                send(executor, payer, &single, &simulation, signers, config, true)
+                                    .await;
                             report.apply_sent(&single.group_ids, sent);
                         }
                         Err(status) => report.set(&single.group_ids, status),
@@ -260,19 +261,28 @@ async fn isolate(
             Err(status) => report.set(std::slice::from_ref(id), status),
         }
     }
-    let send_alone = async |id: &String, report: &mut RunReport| {
+    let send_alone = async |id: &String, fresh: bool, report: &mut RunReport| {
         let single = Batch::from(&by_id[id]);
-        let sent = send(executor, payer, &single, &held[id], signers, config).await;
+        let sent = send(executor, payer, &single, &held[id], signers, config, fresh).await;
         report.apply_sent(&single.group_ids, sent);
     };
     for repacked in pack_reporting(payer, &passing, config, report) {
         if let [id] = repacked.group_ids.as_slice() {
-            send_alone(id, report).await;
+            send_alone(id, true, report).await;
             continue;
         }
         let split = match simulate(executor, payer, &repacked, config).await {
             Ok(simulation) => {
-                let sent = send(executor, payer, &repacked, &simulation, signers, config).await;
+                let sent = send(
+                    executor,
+                    payer,
+                    &repacked,
+                    &simulation,
+                    signers,
+                    config,
+                    true,
+                )
+                .await;
                 report.apply_sent(&repacked.group_ids, sent)
             }
             Err(GroupStatus::Failed { error, .. }) => {
@@ -290,7 +300,7 @@ async fn isolate(
         if split {
             info!("Sending the groups of {:?} one by one", repacked.group_ids);
             for id in &repacked.group_ids {
-                send_alone(id, report).await;
+                send_alone(id, false, report).await;
             }
         }
     }
@@ -337,6 +347,7 @@ async fn simulate(
 }
 
 /// The batch's status, or `split` when its groups should be sent one by one instead.
+/// `fresh`: no other group of the run is known to change what the simulation saw.
 async fn send(
     executor: &TransactionExecutor,
     payer: &Pubkey,
@@ -344,6 +355,7 @@ async fn send(
     simulation: &Simulation,
     signers: &[Arc<dyn Signer + Send + Sync>],
     config: &RunConfig,
+    fresh: bool,
 ) -> Sent {
     let limits = &config.limits;
     let compute_unit_limit =
@@ -430,6 +442,7 @@ async fn send(
                 &budget_ref(rate),
                 signers,
                 config.version,
+                built == 0 && fresh,
             )
             .await;
             Some((attempt, (built + 1, Some(rate))))
@@ -518,6 +531,7 @@ async fn build(
     budget: &Budget,
     signers: &[Arc<dyn Signer + Send + Sync>],
     version: MessageVersion,
+    simulated: bool,
 ) -> anyhow::Result<AttemptTransaction> {
     let (blockhash, last_valid_block_height) = executor.latest_blockhash().await?;
     let mut transaction = compile(payer, &batch.instructions, blockhash, version, budget)
@@ -541,6 +555,7 @@ async fn build(
         transaction,
         last_valid_block_height,
         sent_before: false,
+        simulated,
     })
 }
 

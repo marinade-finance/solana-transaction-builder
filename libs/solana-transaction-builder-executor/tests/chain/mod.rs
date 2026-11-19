@@ -86,6 +86,9 @@ impl Chain {
                 transaction_send_interval: Duration::from_millis(200),
                 waiting_time_after_last_send: Duration::from_secs(1),
                 max_attempts: 3,
+                blockhash_refresh_interval: Duration::ZERO,
+                max_sends_per_second: 1_000,
+                rebroadcast_interval: None,
                 ..TransactionExecutorConfig::default()
             },
             self.clone(),

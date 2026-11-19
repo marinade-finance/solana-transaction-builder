@@ -183,6 +183,31 @@ async fn a_passing_batch_is_simulated_once() {
             1,
             "{version:?}"
         );
+        assert_eq!(
+            world.chain.signed_simulations.load(Ordering::SeqCst),
+            0,
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_resigned_batch_is_simulated_at_send_time() {
+    for version in ALL {
+        let world = world();
+        world.chain.drop_sends.store(true, Ordering::SeqCst);
+
+        let report = world
+            .run(vec![world.pay(0).0], &RunConfig::new(version))
+            .await;
+
+        assert_eq!(report.transactions[0].attempts, 3, "{version:?}");
+        assert_eq!(world.sent().len(), 3, "{version:?}");
+        assert_eq!(
+            world.chain.signed_simulations.load(Ordering::SeqCst),
+            2,
+            "{version:?}"
+        );
     }
 }
 
@@ -260,6 +285,11 @@ async fn groups_that_only_fail_together_go_one_per_transaction() {
         assert_eq!(
             world.chain.unsigned_simulations.load(Ordering::SeqCst),
             1 + 2 + 1,
+            "{version:?}"
+        );
+        assert_eq!(
+            world.chain.signed_simulations.load(Ordering::SeqCst),
+            2,
             "{version:?}"
         );
     }

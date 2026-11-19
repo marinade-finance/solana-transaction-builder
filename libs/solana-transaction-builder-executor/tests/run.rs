@@ -288,6 +288,97 @@ async fn a_batch_over_the_compute_cap_is_repacked_under_it() {
     }
 }
 
+fn two_per_batch(version: MessageVersion, max_in_flight: usize) -> RunConfig {
+    let mut config = RunConfig::new(version);
+    config.limits.max_instructions = match version {
+        MessageVersion::Legacy => 3 + 2,
+        _ => 2,
+    };
+    config.max_in_flight = max_in_flight;
+    config
+}
+
+#[tokio::test]
+async fn batches_are_in_flight_up_to_the_limit() {
+    for version in ALL {
+        let world = world();
+        let groups = (0..8).map(|id| world.pay(id).0).collect();
+
+        let report = world.run(groups, &two_per_batch(version, 3)).await;
+
+        assert_eq!(landed(&report), 8, "{version:?} {report:?}");
+        assert_eq!(report.transactions.len(), 4, "{version:?}");
+        assert_eq!(
+            world.chain.max_in_flight_seen.load(Ordering::SeqCst),
+            3,
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn one_in_flight_sends_batches_one_after_another() {
+    for version in ALL {
+        let world = world();
+        let groups = (0..8).map(|id| world.pay(id).0).collect();
+
+        let report = world.run(groups, &two_per_batch(version, 1)).await;
+
+        assert_eq!(landed(&report), 8, "{version:?} {report:?}");
+        assert_eq!(
+            world.chain.max_in_flight_seen.load(Ordering::SeqCst),
+            1,
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_zero_limit_runs_as_one() {
+    for version in ALL {
+        let world = world();
+        let groups = (0..4).map(|id| world.pay(id).0).collect();
+
+        let report = world.run(groups, &two_per_batch(version, 0)).await;
+
+        assert_eq!(landed(&report), 4, "{version:?} {report:?}");
+        assert_eq!(
+            world.chain.max_in_flight_seen.load(Ordering::SeqCst),
+            1,
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_report_order_does_not_depend_on_the_landing_order() {
+    for version in ALL {
+        let world = world();
+        let groups = (0..8).map(|id| world.pay(id).0).collect();
+
+        let report = world.run(groups, &two_per_batch(version, 4)).await;
+
+        assert_eq!(
+            report
+                .groups
+                .iter()
+                .map(|outcome| outcome.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["0", "1", "2", "3", "4", "5", "6", "7"],
+            "{version:?}"
+        );
+        assert_eq!(
+            report
+                .transactions
+                .iter()
+                .map(|transaction| transaction.group_ids.join(","))
+                .collect::<Vec<_>>(),
+            vec!["0,1", "2,3", "4,5", "6,7"],
+            "{version:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn the_compute_limit_is_the_simulated_units_with_the_margin() {
     for version in ALL {

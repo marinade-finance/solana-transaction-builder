@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -48,6 +48,9 @@ pub struct Chain {
     pub recent_fees: Mutex<Vec<u64>>,
     pub unsigned_simulations: AtomicUsize,
     pub signed_simulations: AtomicUsize,
+    in_flight: Mutex<HashSet<Signature>>,
+    /// The most signatures sent and not yet seen by a status read.
+    pub max_in_flight_seen: AtomicUsize,
 }
 
 pub const POISONED: TransactionError =
@@ -71,6 +74,8 @@ impl Chain {
             recent_fees: Mutex::new(Vec::new()),
             unsigned_simulations: AtomicUsize::new(0),
             signed_simulations: AtomicUsize::new(0),
+            in_flight: Mutex::new(HashSet::new()),
+            max_in_flight_seen: AtomicUsize::new(0),
         })
     }
 
@@ -178,6 +183,12 @@ impl SendTransactionProvider for Chain {
             sent.len() - 1
         };
         let signature = transaction.signatures[0];
+        {
+            let mut in_flight = self.in_flight.lock().unwrap();
+            in_flight.insert(signature);
+            self.max_in_flight_seen
+                .fetch_max(in_flight.len(), Ordering::SeqCst);
+        }
         if self.drop_sends.load(Ordering::SeqCst)
             || index < self.dropped_first_sends.load(Ordering::SeqCst)
         {
@@ -208,6 +219,10 @@ impl SignatureStatusesProvider for Chain {
         signatures: &[Signature],
     ) -> RpcResult<Vec<Option<TransactionStatus>>> {
         let landed = self.landed.lock().unwrap();
+        self.in_flight
+            .lock()
+            .unwrap()
+            .retain(|signature| !landed.contains_key(signature));
         Ok(Response {
             context: RpcResponseContext {
                 slot: 1,

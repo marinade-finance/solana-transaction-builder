@@ -38,7 +38,8 @@ group that spends what another group creates may fail its simulation.
 4. A batch that fails simulation has its groups simulated alone: a failing group is reported
    `Failed` with its logs, the rest are packed again with their measured units. A re-packed batch
    that fails again goes one group per transaction.
-5. Send through the executor, at most its `max_attempts` builds. The first attempt pays the fee
+5. Send through the executor, up to `RunConfig::max_in_flight` batches at once (8 by default), at
+   most `max_attempts` builds per batch. The first attempt pays the fee
    policy's start rate, 0 by default, or the network's rate under `FeeStrategy::Dynamic`; a retry
    rebuilds with a fresh blockhash and the next rate.
 6. A batch whose failure is proven, or for which nothing was sent, goes again one group per

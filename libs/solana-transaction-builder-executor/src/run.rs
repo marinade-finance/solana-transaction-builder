@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use futures_util::stream;
+use futures_util::{StreamExt, stream};
 use log::{info, warn};
 use solana_hash::Hash;
 use solana_pubkey::Pubkey;
@@ -20,6 +20,8 @@ pub struct RunConfig {
     pub limits: Limits,
     pub fee: FeePolicy,
     pub dry_run: bool,
+    /// Batches sent at once; 0 counts as 1.
+    pub max_in_flight: usize,
 }
 
 impl RunConfig {
@@ -29,6 +31,7 @@ impl RunConfig {
             limits: Limits::of(version),
             fee: FeePolicy::default(),
             dry_run: false,
+            max_in_flight: 8,
         }
     }
 }
@@ -158,8 +161,17 @@ pub async fn run(
         .into_iter()
         .map(|group| (group.id().to_owned(), group))
         .collect();
-    for batch in batches {
-        let batch_report = run_batch(executor, payer, batch, &by_id, signers, config).await;
+    let by_id = &by_id;
+    let mut batch_reports: Vec<(usize, RunReport)> = stream::iter(batches.into_iter().enumerate())
+        .map(|(index, batch)| async move {
+            let batch_report = run_batch(executor, payer, batch, by_id, signers, config).await;
+            (index, batch_report)
+        })
+        .buffer_unordered(config.max_in_flight.max(1))
+        .collect()
+        .await;
+    batch_reports.sort_by_key(|(index, _)| *index);
+    for (_, batch_report) in batch_reports {
         report.groups.extend(batch_report.groups);
         report.transactions.extend(batch_report.transactions);
     }

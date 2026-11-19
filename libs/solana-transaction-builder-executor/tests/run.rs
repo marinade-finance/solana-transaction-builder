@@ -384,10 +384,18 @@ async fn a_zero_limit_runs_as_one() {
 async fn the_report_order_does_not_depend_on_the_landing_order() {
     for version in ALL {
         let world = world();
+        world.chain.dropped_first_sends.store(1, Ordering::SeqCst);
         let groups = (0..8).map(|id| world.pay(id).0).collect();
 
         let report = world.run(groups, &two_per_batch(version, 4)).await;
 
+        assert_eq!(landed(&report), 8, "{version:?} {report:?}");
+        assert_eq!(report.transactions[0].attempts, 2, "{version:?}");
+        assert_eq!(
+            world.sent().last().unwrap().signatures[0],
+            report.transactions[0].signature.unwrap(),
+            "{version:?} batch 0 lands last"
+        );
         assert_eq!(
             report
                 .groups
@@ -965,5 +973,151 @@ async fn eleven_thousand_claims_cost_one_simulation_per_batch() {
             status_calls.len()
         );
         assert!(in_flight <= max_in_flight, "{in_flight}");
+    }
+}
+
+#[tokio::test]
+async fn a_group_identical_to_an_earlier_one_is_not_sent() {
+    for version in ALL {
+        let world = world();
+        let to = Pubkey::new_unique();
+        let pay_to =
+            |id: &str| group(id, vec![transfer(&world.payer.pubkey(), &to, AMOUNT)]).unwrap();
+
+        let report = world
+            .run(vec![pay_to("a"), pay_to("b")], &RunConfig::new(version))
+            .await;
+
+        assert!(
+            matches!(status(&report, "a"), GroupStatus::Landed { .. }),
+            "{version:?} {report:?}"
+        );
+        assert_eq!(
+            status(&report, "b"),
+            &GroupStatus::NotSent {
+                reason: "identical to group a".into()
+            },
+            "{version:?}"
+        );
+        assert_eq!(world.chain.balance(&to), AMOUNT, "{version:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_repacked_batch_that_lands_with_an_error_is_retried_group_by_group() {
+    for version in ALL {
+        let world = world();
+        let broke = group(
+            "broke",
+            vec![transfer(
+                &world.payer.pubkey(),
+                &Pubkey::new_unique(),
+                100 * SOL,
+            )],
+        )
+        .unwrap();
+        let (poisoned, poisoned_to) = world.pay(1);
+        *world.chain.poison.lock().unwrap() = Some(poisoned_to);
+
+        let report = world
+            .run(
+                vec![world.pay(0).0, broke, poisoned],
+                &RunConfig::new(version),
+            )
+            .await;
+
+        assert!(
+            matches!(
+                status(&report, "broke"),
+                GroupStatus::Failed {
+                    signature: None,
+                    ..
+                }
+            ),
+            "{version:?} {report:?}"
+        );
+        assert!(
+            matches!(status(&report, "0"), GroupStatus::Landed { .. }),
+            "{version:?} {report:?}"
+        );
+        assert!(
+            matches!(
+                status(&report, "1"),
+                GroupStatus::Failed {
+                    signature: Some(_),
+                    ..
+                }
+            ),
+            "{version:?} {report:?}"
+        );
+        assert_eq!(
+            report
+                .transactions
+                .iter()
+                .map(|transaction| transaction.group_ids.join(","))
+                .collect::<Vec<_>>(),
+            vec!["0,1", "0", "1"],
+            "{version:?}"
+        );
+        assert_eq!(
+            world.chain.signed_simulations.load(Ordering::SeqCst),
+            2,
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_repacked_single_is_simulated_again_before_its_send() {
+    for version in ALL {
+        let probe = world();
+        let one = probe
+            .run(vec![probe.pay(0).0], &RunConfig::new(version))
+            .await
+            .transactions[0]
+            .compute_units_consumed;
+        let world = world();
+        let spender = Arc::new(Keypair::new());
+        world.chain.airdrop(&spender.pubkey(), SOL);
+        let spend = |id: &str| {
+            group(
+                id,
+                vec![transfer(
+                    &spender.pubkey(),
+                    &Pubkey::new_unique(),
+                    SOL / 10 * 6,
+                )],
+            )
+            .unwrap()
+        };
+        let signers: Vec<Arc<dyn Signer + Send + Sync>> =
+            vec![world.payer.clone(), spender.clone()];
+        let mut config = RunConfig::new(version);
+        config.limits.max_compute_units = u32::try_from(one).unwrap() + 10;
+
+        let report = run(
+            &world.chain.executor(),
+            &world.payer.pubkey(),
+            vec![spend("a"), spend("b")],
+            &signers,
+            &config,
+        )
+        .await;
+
+        assert!(
+            matches!(status(&report, "a"), GroupStatus::Landed { .. }),
+            "{version:?} {report:?}"
+        );
+        assert!(
+            matches!(
+                status(&report, "b"),
+                GroupStatus::Failed {
+                    signature: None,
+                    ..
+                }
+            ),
+            "{version:?} {report:?}"
+        );
+        assert_eq!(world.sent().len(), 1, "{version:?}");
     }
 }

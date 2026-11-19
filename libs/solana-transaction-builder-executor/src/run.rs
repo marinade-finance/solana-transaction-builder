@@ -156,6 +156,7 @@ pub async fn run(
             None => signed.push(group),
         }
     }
+    let signed = drop_identical(signed, &mut report);
     let batches = pack_reporting(payer, &signed, config, &mut report);
     let by_id: HashMap<String, Group> = signed
         .into_iter()
@@ -177,6 +178,41 @@ pub async fn run(
     }
     report.groups.sort_by_key(|outcome| order[&outcome.id]);
     report
+}
+
+type InstructionsKey = Vec<(Pubkey, Vec<(Pubkey, bool, bool)>, Vec<u8>)>;
+
+/// Within one cached blockhash, identical instructions compile to one transaction.
+fn drop_identical(groups: Vec<Group>, report: &mut RunReport) -> Vec<Group> {
+    let mut first: HashMap<InstructionsKey, String> = HashMap::new();
+    let mut kept = Vec::new();
+    for group in groups {
+        let key: InstructionsKey = group
+            .instructions()
+            .iter()
+            .map(|instruction| {
+                let accounts = instruction
+                    .accounts
+                    .iter()
+                    .map(|meta| (meta.pubkey, meta.is_signer, meta.is_writable))
+                    .collect();
+                (instruction.program_id, accounts, instruction.data.clone())
+            })
+            .collect();
+        match first.get(&key) {
+            Some(earlier) => report.set(
+                &[group.id().to_owned()],
+                GroupStatus::NotSent {
+                    reason: format!("identical to group {earlier}"),
+                },
+            ),
+            None => {
+                first.insert(key, group.id().to_owned());
+                kept.push(group);
+            }
+        }
+    }
+    kept
 }
 
 fn pack_reporting(
@@ -261,14 +297,14 @@ async fn isolate(
             Err(status) => report.set(std::slice::from_ref(id), status),
         }
     }
-    let send_alone = async |id: &String, fresh: bool, report: &mut RunReport| {
+    let send_alone = async |id: &String, report: &mut RunReport| {
         let single = Batch::from(&by_id[id]);
-        let sent = send(executor, payer, &single, &held[id], signers, config, fresh).await;
+        let sent = send(executor, payer, &single, &held[id], signers, config, false).await;
         report.apply_sent(&single.group_ids, sent);
     };
     for repacked in pack_reporting(payer, &passing, config, report) {
         if let [id] = repacked.group_ids.as_slice() {
-            send_alone(id, true, report).await;
+            send_alone(id, report).await;
             continue;
         }
         let split = match simulate(executor, payer, &repacked, config).await {
@@ -300,7 +336,7 @@ async fn isolate(
         if split {
             info!("Sending the groups of {:?} one by one", repacked.group_ids);
             for id in &repacked.group_ids {
-                send_alone(id, false, report).await;
+                send_alone(id, report).await;
             }
         }
     }
@@ -346,8 +382,7 @@ async fn simulate(
     }
 }
 
-/// The batch's status, or `split` when its groups should be sent one by one instead.
-/// `fresh`: no other group of the run is known to change what the simulation saw.
+/// The batch's status, or `split` to send its groups alone; `fresh`: `simulation` is still current.
 async fn send(
     executor: &TransactionExecutor,
     payer: &Pubkey,

@@ -145,10 +145,9 @@ impl Chain {
 
     fn statuses(&self, signatures: &[Signature]) -> RpcResult<Vec<Option<TransactionStatus>>> {
         let landed = self.landed.lock().unwrap();
-        self.in_flight
-            .lock()
-            .unwrap()
-            .retain(|signature| !landed.contains_key(signature));
+        self.in_flight.lock().unwrap().retain(|signature| {
+            !(signatures.contains(signature) && landed.contains_key(signature))
+        });
         Ok(Response {
             context: RpcResponseContext {
                 slot: 1,

@@ -27,8 +27,8 @@ The `solana-to-4.x` line uses the Solana 4.x crates; `solana-3.0.x` keeps the ol
 
 ## A run (`solana-transaction-builder-executor::run`)
 
-The groups must be independent: every simulation runs against the state before the run, so a
-group that spends what another group creates may fail its simulation.
+The groups must be independent: batches are simulated and sent in parallel, in no fixed order, so
+a group that spends what another group creates may fail.
 
 1. Refuse the whole run as `NotSent` when a group id repeats, and a group whose signer is not given
    as `NotSent`.

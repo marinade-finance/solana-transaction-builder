@@ -169,6 +169,255 @@ async fn a_group_that_fails_alone_is_reported_and_the_rest_land() {
 }
 
 #[tokio::test]
+async fn a_passing_batch_is_simulated_once() {
+    for version in ALL {
+        let world = world();
+        let groups = (0..3).map(|id| world.pay(id).0).collect();
+
+        let report = world.run(groups, &RunConfig::new(version)).await;
+
+        assert_eq!(landed(&report), 3, "{version:?} {report:?}");
+        assert_eq!(report.transactions.len(), 1, "{version:?}");
+        assert_eq!(
+            world.chain.unsigned_simulations.load(Ordering::SeqCst),
+            1,
+            "{version:?}"
+        );
+        assert_eq!(
+            world.chain.signed_simulations.load(Ordering::SeqCst),
+            0,
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_resigned_batch_is_simulated_at_send_time() {
+    for version in ALL {
+        let world = world();
+        world.chain.drop_sends.store(true, Ordering::SeqCst);
+
+        let report = world
+            .run(vec![world.pay(0).0], &RunConfig::new(version))
+            .await;
+
+        assert_eq!(report.transactions[0].attempts, 3, "{version:?}");
+        assert_eq!(world.sent().len(), 3, "{version:?}");
+        assert_eq!(
+            world.chain.signed_simulations.load(Ordering::SeqCst),
+            2,
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_failing_group_is_isolated_and_the_rest_are_repacked() {
+    for version in ALL {
+        let world = world();
+        let broke = group(
+            "broke",
+            vec![transfer(
+                &world.payer.pubkey(),
+                &Pubkey::new_unique(),
+                100 * SOL,
+            )],
+        )
+        .unwrap();
+        let groups = vec![world.pay(0).0, broke, world.pay(1).0];
+
+        let report = world.run(groups, &RunConfig::new(version)).await;
+
+        assert!(
+            matches!(status(&report, "broke"), GroupStatus::Failed { .. }),
+            "{version:?}"
+        );
+        assert_eq!(landed(&report), 2, "{version:?} {report:?}");
+        assert_eq!(report.transactions.len(), 1, "{version:?}");
+        assert_eq!(report.transactions[0].group_ids, vec!["0", "1"]);
+        assert_eq!(
+            world.chain.unsigned_simulations.load(Ordering::SeqCst),
+            1 + 3 + 1,
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn groups_that_only_fail_together_go_one_per_transaction() {
+    for version in ALL {
+        let world = world();
+        let spender = Arc::new(Keypair::new());
+        world.chain.airdrop(&spender.pubkey(), SOL);
+        let spend = |id: &str| {
+            group(
+                id,
+                vec![transfer(
+                    &spender.pubkey(),
+                    &Pubkey::new_unique(),
+                    SOL / 10 * 6,
+                )],
+            )
+            .unwrap()
+        };
+        let signers: Vec<Arc<dyn Signer + Send + Sync>> =
+            vec![world.payer.clone(), spender.clone()];
+
+        let report = run(
+            &world.chain.executor(),
+            &world.payer.pubkey(),
+            vec![spend("a"), spend("b")],
+            &signers,
+            &RunConfig::new(version),
+        )
+        .await;
+
+        assert!(
+            matches!(status(&report, "a"), GroupStatus::Landed { .. }),
+            "{version:?} {report:?}"
+        );
+        assert!(
+            matches!(status(&report, "b"), GroupStatus::Failed { .. }),
+            "{version:?} {report:?}"
+        );
+        assert_eq!(report.transactions.len(), 2, "{version:?}");
+        assert_eq!(world.sent().len(), 1, "{version:?}");
+        assert_eq!(
+            world.chain.unsigned_simulations.load(Ordering::SeqCst),
+            1 + 2 + 1,
+            "{version:?}"
+        );
+        assert_eq!(
+            world.chain.signed_simulations.load(Ordering::SeqCst),
+            2,
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_batch_over_the_compute_cap_is_repacked_under_it() {
+    for version in ALL {
+        let probe = world();
+        let one = probe
+            .run(vec![probe.pay(0).0], &RunConfig::new(version))
+            .await
+            .transactions[0]
+            .compute_units_consumed;
+        let world = world();
+        let mut config = RunConfig::new(version);
+        config.limits.max_compute_units = u32::try_from(one).unwrap() + 10;
+
+        let report = world
+            .run((0..3).map(|id| world.pay(id).0).collect(), &config)
+            .await;
+
+        assert_eq!(landed(&report), 3, "{version:?} {report:?}");
+        assert_eq!(report.transactions.len(), 3, "{version:?}");
+        assert_eq!(world.sent().len(), 3, "{version:?}");
+    }
+}
+
+fn two_per_batch(version: MessageVersion, max_in_flight: usize) -> RunConfig {
+    let mut config = RunConfig::new(version);
+    config.limits.max_instructions = match version {
+        MessageVersion::Legacy => 3 + 2,
+        _ => 2,
+    };
+    config.max_in_flight = max_in_flight;
+    config
+}
+
+#[tokio::test]
+async fn batches_are_in_flight_up_to_the_limit() {
+    for version in ALL {
+        let world = world();
+        let groups = (0..8).map(|id| world.pay(id).0).collect();
+
+        let report = world.run(groups, &two_per_batch(version, 3)).await;
+
+        assert_eq!(landed(&report), 8, "{version:?} {report:?}");
+        assert_eq!(report.transactions.len(), 4, "{version:?}");
+        assert_eq!(
+            world.chain.max_in_flight_seen.load(Ordering::SeqCst),
+            3,
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn one_in_flight_sends_batches_one_after_another() {
+    for version in ALL {
+        let world = world();
+        let groups = (0..8).map(|id| world.pay(id).0).collect();
+
+        let report = world.run(groups, &two_per_batch(version, 1)).await;
+
+        assert_eq!(landed(&report), 8, "{version:?} {report:?}");
+        assert_eq!(
+            world.chain.max_in_flight_seen.load(Ordering::SeqCst),
+            1,
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_zero_limit_runs_as_one() {
+    for version in ALL {
+        let world = world();
+        let groups = (0..4).map(|id| world.pay(id).0).collect();
+
+        let report = world.run(groups, &two_per_batch(version, 0)).await;
+
+        assert_eq!(landed(&report), 4, "{version:?} {report:?}");
+        assert_eq!(
+            world.chain.max_in_flight_seen.load(Ordering::SeqCst),
+            1,
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_report_order_does_not_depend_on_the_landing_order() {
+    for version in ALL {
+        let world = world();
+        world.chain.dropped_first_sends.store(1, Ordering::SeqCst);
+        let groups = (0..8).map(|id| world.pay(id).0).collect();
+
+        let report = world.run(groups, &two_per_batch(version, 4)).await;
+
+        assert_eq!(landed(&report), 8, "{version:?} {report:?}");
+        assert_eq!(report.transactions[0].attempts, 2, "{version:?}");
+        assert_eq!(
+            world.sent().last().unwrap().signatures[0],
+            report.transactions[0].signature.unwrap(),
+            "{version:?} batch 0 lands last"
+        );
+        assert_eq!(
+            report
+                .groups
+                .iter()
+                .map(|outcome| outcome.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["0", "1", "2", "3", "4", "5", "6", "7"],
+            "{version:?}"
+        );
+        assert_eq!(
+            report
+                .transactions
+                .iter()
+                .map(|transaction| transaction.group_ids.join(","))
+                .collect::<Vec<_>>(),
+            vec!["0,1", "2,3", "4,5", "6,7"],
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn the_compute_limit_is_the_simulated_units_with_the_margin() {
     for version in ALL {
         let world = world();
@@ -670,5 +919,205 @@ async fn an_unknown_batch_is_not_retried() {
         }
         assert_eq!(world.sent().len(), 1, "{version:?}");
         assert_eq!(report.transactions.len(), 1, "{version:?}");
+    }
+}
+
+const CLAIMS: usize = 11_155;
+const CLAIMS_PER_TX: usize = 6;
+
+async fn claims_run(max_in_flight: usize) -> (World, RunReport, std::time::Duration) {
+    let world = world();
+    world.chain.airdrop(&world.payer.pubkey(), 20 * SOL);
+    let groups = (0..CLAIMS).map(|id| world.pay(id).0).collect();
+    let mut config = RunConfig::new(MessageVersion::V1);
+    config.limits.max_instructions = CLAIMS_PER_TX;
+    config.max_in_flight = max_in_flight;
+    let start = std::time::Instant::now();
+    let report = world.run(groups, &config).await;
+    (world, report, start.elapsed())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn eleven_thousand_claims_cost_one_simulation_per_batch() {
+    let status_interval = world()
+        .chain
+        .executor()
+        .transaction_executor_config
+        .signature_status_check_interval;
+    for max_in_flight in [8, 32] {
+        let (world, report, elapsed) = claims_run(max_in_flight).await;
+        let batches = CLAIMS.div_ceil(CLAIMS_PER_TX);
+        let status_calls = world.chain.status_calls.lock().unwrap().clone();
+        let unsigned = world.chain.unsigned_simulations.load(Ordering::SeqCst);
+        let signed = world.chain.signed_simulations.load(Ordering::SeqCst);
+        let in_flight = world.chain.max_in_flight_seen.load(Ordering::SeqCst);
+        println!(
+            "max_in_flight {max_in_flight}: {} txs, {unsigned} unsigned and {signed} signed \
+             simulations, {} status calls in {elapsed:?}, {in_flight} in flight at most",
+            report.transactions.len(),
+            status_calls.len()
+        );
+
+        assert_eq!(landed(&report), CLAIMS, "{max_in_flight}");
+        assert_eq!(report.transactions.len(), batches);
+        assert_eq!(unsigned, batches);
+        assert_eq!(signed, 0);
+        assert!(
+            status_calls.iter().all(|size| *size <= 256),
+            "{status_calls:?}"
+        );
+        let ticks = elapsed.as_millis() / status_interval.as_millis();
+        assert!(
+            status_calls.len() as u128 <= ticks + 2,
+            "{} status calls in {ticks} intervals",
+            status_calls.len()
+        );
+        assert!(in_flight <= max_in_flight, "{in_flight}");
+    }
+}
+
+#[tokio::test]
+async fn a_group_identical_to_an_earlier_one_is_not_sent() {
+    for version in ALL {
+        let world = world();
+        let to = Pubkey::new_unique();
+        let pay_to =
+            |id: &str| group(id, vec![transfer(&world.payer.pubkey(), &to, AMOUNT)]).unwrap();
+
+        let report = world
+            .run(vec![pay_to("a"), pay_to("b")], &RunConfig::new(version))
+            .await;
+
+        assert!(
+            matches!(status(&report, "a"), GroupStatus::Landed { .. }),
+            "{version:?} {report:?}"
+        );
+        assert_eq!(
+            status(&report, "b"),
+            &GroupStatus::NotSent {
+                reason: "identical to group a".into()
+            },
+            "{version:?}"
+        );
+        assert_eq!(world.chain.balance(&to), AMOUNT, "{version:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_repacked_batch_that_lands_with_an_error_is_retried_group_by_group() {
+    for version in ALL {
+        let world = world();
+        let broke = group(
+            "broke",
+            vec![transfer(
+                &world.payer.pubkey(),
+                &Pubkey::new_unique(),
+                100 * SOL,
+            )],
+        )
+        .unwrap();
+        let (poisoned, poisoned_to) = world.pay(1);
+        *world.chain.poison.lock().unwrap() = Some(poisoned_to);
+
+        let report = world
+            .run(
+                vec![world.pay(0).0, broke, poisoned],
+                &RunConfig::new(version),
+            )
+            .await;
+
+        assert!(
+            matches!(
+                status(&report, "broke"),
+                GroupStatus::Failed {
+                    signature: None,
+                    ..
+                }
+            ),
+            "{version:?} {report:?}"
+        );
+        assert!(
+            matches!(status(&report, "0"), GroupStatus::Landed { .. }),
+            "{version:?} {report:?}"
+        );
+        assert!(
+            matches!(
+                status(&report, "1"),
+                GroupStatus::Failed {
+                    signature: Some(_),
+                    ..
+                }
+            ),
+            "{version:?} {report:?}"
+        );
+        assert_eq!(
+            report
+                .transactions
+                .iter()
+                .map(|transaction| transaction.group_ids.join(","))
+                .collect::<Vec<_>>(),
+            vec!["0,1", "0", "1"],
+            "{version:?}"
+        );
+        assert_eq!(
+            world.chain.signed_simulations.load(Ordering::SeqCst),
+            2,
+            "{version:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_repacked_single_is_simulated_again_before_its_send() {
+    for version in ALL {
+        let probe = world();
+        let one = probe
+            .run(vec![probe.pay(0).0], &RunConfig::new(version))
+            .await
+            .transactions[0]
+            .compute_units_consumed;
+        let world = world();
+        let spender = Arc::new(Keypair::new());
+        world.chain.airdrop(&spender.pubkey(), SOL);
+        let spend = |id: &str| {
+            group(
+                id,
+                vec![transfer(
+                    &spender.pubkey(),
+                    &Pubkey::new_unique(),
+                    SOL / 10 * 6,
+                )],
+            )
+            .unwrap()
+        };
+        let signers: Vec<Arc<dyn Signer + Send + Sync>> =
+            vec![world.payer.clone(), spender.clone()];
+        let mut config = RunConfig::new(version);
+        config.limits.max_compute_units = u32::try_from(one).unwrap() + 10;
+
+        let report = run(
+            &world.chain.executor(),
+            &world.payer.pubkey(),
+            vec![spend("a"), spend("b")],
+            &signers,
+            &config,
+        )
+        .await;
+
+        assert!(
+            matches!(status(&report, "a"), GroupStatus::Landed { .. }),
+            "{version:?} {report:?}"
+        );
+        assert!(
+            matches!(
+                status(&report, "b"),
+                GroupStatus::Failed {
+                    signature: None,
+                    ..
+                }
+            ),
+            "{version:?} {report:?}"
+        );
+        assert_eq!(world.sent().len(), 1, "{version:?}");
     }
 }

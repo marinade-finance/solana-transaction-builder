@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -46,6 +46,13 @@ pub struct Chain {
     pub simulation_rpc_fails: AtomicBool,
     pub hide_units: AtomicBool,
     pub recent_fees: Mutex<Vec<u64>>,
+    pub unsigned_simulations: AtomicUsize,
+    pub signed_simulations: AtomicUsize,
+    in_flight: Mutex<HashSet<Signature>>,
+    /// The most signatures sent and not yet seen by a status read.
+    pub max_in_flight_seen: AtomicUsize,
+    /// Size of every status call, history reads excluded.
+    pub status_calls: Mutex<Vec<usize>>,
 }
 
 pub const POISONED: TransactionError =
@@ -67,6 +74,11 @@ impl Chain {
             simulation_rpc_fails: AtomicBool::new(false),
             hide_units: AtomicBool::new(false),
             recent_fees: Mutex::new(Vec::new()),
+            unsigned_simulations: AtomicUsize::new(0),
+            signed_simulations: AtomicUsize::new(0),
+            in_flight: Mutex::new(HashSet::new()),
+            max_in_flight_seen: AtomicUsize::new(0),
+            status_calls: Mutex::new(Vec::new()),
         })
     }
 
@@ -77,6 +89,9 @@ impl Chain {
                 transaction_send_interval: Duration::from_millis(200),
                 waiting_time_after_last_send: Duration::from_secs(1),
                 max_attempts: 3,
+                block_height_refresh_interval: Duration::ZERO,
+                max_sends_per_second: 1_000,
+                rebroadcast_interval: None,
                 ..TransactionExecutorConfig::default()
             },
             self.clone(),
@@ -127,6 +142,31 @@ impl Chain {
             },
         })
     }
+
+    fn statuses(&self, signatures: &[Signature]) -> RpcResult<Vec<Option<TransactionStatus>>> {
+        let landed = self.landed.lock().unwrap();
+        self.in_flight.lock().unwrap().retain(|signature| {
+            !(signatures.contains(signature) && landed.contains_key(signature))
+        });
+        Ok(Response {
+            context: RpcResponseContext {
+                slot: 1,
+                api_version: None,
+            },
+            value: signatures
+                .iter()
+                .map(|signature| {
+                    landed.get(signature).map(|result| TransactionStatus {
+                        slot: 1,
+                        confirmations: None,
+                        status: result.clone(),
+                        err: result.clone().err(),
+                        confirmation_status: Some(TransactionConfirmationStatus::Finalized),
+                    })
+                })
+                .collect(),
+        })
+    }
 }
 
 #[async_trait]
@@ -135,6 +175,7 @@ impl SimulateTransactionProvider for Chain {
         &self,
         transaction: &VersionedTransaction,
     ) -> RpcResult<RpcSimulateTransactionResult> {
+        self.signed_simulations.fetch_add(1, Ordering::SeqCst);
         self.simulate(transaction.clone())
     }
 
@@ -142,6 +183,7 @@ impl SimulateTransactionProvider for Chain {
         &self,
         transaction: &VersionedTransaction,
     ) -> RpcResult<RpcSimulateTransactionResult> {
+        self.unsigned_simulations.fetch_add(1, Ordering::SeqCst);
         if self.simulation_rpc_fails.load(Ordering::SeqCst) {
             return Err(ClientErrorKind::Custom(
                 "error sending request for url (https://rpc.example.com/?api-key=SECRET)".into(),
@@ -172,6 +214,12 @@ impl SendTransactionProvider for Chain {
             sent.len() - 1
         };
         let signature = transaction.signatures[0];
+        {
+            let mut in_flight = self.in_flight.lock().unwrap();
+            in_flight.insert(signature);
+            self.max_in_flight_seen
+                .fetch_max(in_flight.len(), Ordering::SeqCst);
+        }
         if self.drop_sends.load(Ordering::SeqCst)
             || index < self.dropped_first_sends.load(Ordering::SeqCst)
         {
@@ -201,32 +249,15 @@ impl SignatureStatusesProvider for Chain {
         &self,
         signatures: &[Signature],
     ) -> RpcResult<Vec<Option<TransactionStatus>>> {
-        let landed = self.landed.lock().unwrap();
-        Ok(Response {
-            context: RpcResponseContext {
-                slot: 1,
-                api_version: None,
-            },
-            value: signatures
-                .iter()
-                .map(|signature| {
-                    landed.get(signature).map(|result| TransactionStatus {
-                        slot: 1,
-                        confirmations: None,
-                        status: result.clone(),
-                        err: result.clone().err(),
-                        confirmation_status: Some(TransactionConfirmationStatus::Finalized),
-                    })
-                })
-                .collect(),
-        })
+        self.status_calls.lock().unwrap().push(signatures.len());
+        self.statuses(signatures)
     }
 
     async fn get_signature_statuses_with_history(
         &self,
         signatures: &[Signature],
     ) -> RpcResult<Vec<Option<TransactionStatus>>> {
-        self.get_signature_statuses(signatures).await
+        self.statuses(signatures)
     }
 
     async fn latest_blockhash(&self) -> anyhow::Result<(Hash, u64)> {

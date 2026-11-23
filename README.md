@@ -27,18 +27,28 @@ The `solana-to-4.x` line uses the Solana 4.x crates; `solana-3.0.x` keeps the ol
 
 ## A run (`solana-transaction-builder-executor::run`)
 
-The groups must be independent: each is simulated alone against the state before the run, so a
-group that spends what an earlier group creates fails its simulation.
+The groups must be independent: batches are simulated and sent in parallel, in no fixed order, so
+a group that spends what another group creates may fail.
 
 1. Refuse the whole run as `NotSent` when a group id repeats, and a group whose signer is not given
    as `NotSent`.
-2. Simulate each group alone; a failing group is reported `Failed` with its logs.
-3. Pack the rest.
-4. Simulate each batch and set its compute and loaded-accounts limits to the measured values plus
+2. Pack the groups.
+3. Simulate each batch and set its compute and loaded-accounts limits to the measured values plus
    the margin; without measured units the compute limit is the cap.
-5. Send through the executor, at most its `max_attempts` builds. The first attempt pays the fee
-   policy's start rate, 0 by default, or the network's rate under `FeeStrategy::Dynamic`; a retry
-   rebuilds with a fresh blockhash and the next rate.
+4. A batch that fails simulation has its groups simulated alone: a failing group is reported
+   `Failed` with its logs, the rest are packed again with their measured units. A re-packed batch
+   that fails again goes one group per transaction.
+5. Send through the executor, up to `RunConfig::max_in_flight` batches at once (8 by default), at
+   most `max_attempts` builds per batch. The first attempt is marked `simulated`, so the executor
+   does not simulate it again; a re-signed attempt, and a group sent alone after its re-packed
+   batch failed, are simulated before the send. The first attempt's real budget is never simulated
+   and sends skip preflight, so a budget that fails at the real rate shows only on chain. Rate
+   limit, rebroadcast and the block height cache are the executor's `TransactionExecutorConfig`
+   knobs. A group whose instructions equal an earlier group's is `NotSent`: batches built in
+   parallel can share a blockhash and be one transaction. A batch that still compiles to another
+   batch's transaction goes one group per transaction, or is `NotSent` when it is a single group.
+   The first attempt pays the fee policy's start rate, 0 by default, or the network's rate under
+   `FeeStrategy::Dynamic`; a retry rebuilds with a fresh blockhash and the next rate.
 6. A batch whose failure is proven, or for which nothing was sent, goes again one group per
    transaction. A batch that landed with an error splits only when the executor waits for each
    blockhash to expire before a retry. A batch that is `Unknown` is never sent again.

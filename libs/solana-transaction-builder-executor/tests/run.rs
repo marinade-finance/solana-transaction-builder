@@ -1004,6 +1004,48 @@ async fn a_group_identical_to_an_earlier_one_is_not_sent() {
 }
 
 #[tokio::test]
+async fn batches_of_different_groups_that_compile_alike_are_not_one_transaction() {
+    for version in ALL {
+        for max_in_flight in [1, 2] {
+            let world = world();
+            let (x, y) = (Pubkey::new_unique(), Pubkey::new_unique());
+            let pay = |to: &Pubkey| transfer(&world.payer.pubkey(), to, AMOUNT);
+            let groups = vec![
+                group("a", vec![pay(&x), pay(&y)]).unwrap(),
+                group("b", vec![pay(&x)]).unwrap(),
+                group("c", vec![pay(&y)]).unwrap(),
+            ];
+
+            let report = world
+                .run(groups, &two_per_batch(version, max_in_flight))
+                .await;
+
+            let is_landed = |id: &str| matches!(status(&report, id), GroupStatus::Landed { .. });
+            let paid = |ids: [&str; 2]| ids.iter().filter(|id| is_landed(id)).count() as u64;
+            let context = format!("{version:?} {max_in_flight} {report:?}");
+            let signatures: Vec<_> = report
+                .transactions
+                .iter()
+                .filter_map(|tx| tx.signature)
+                .collect();
+            let unique: std::collections::HashSet<_> = signatures.iter().collect();
+            assert_eq!(unique.len(), signatures.len(), "{context}");
+            assert!(landed(&report) >= 2, "{context}");
+            assert_eq!(
+                world.chain.balance(&x),
+                AMOUNT * paid(["a", "b"]),
+                "{context}"
+            );
+            assert_eq!(
+                world.chain.balance(&y),
+                AMOUNT * paid(["a", "c"]),
+                "{context}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_repacked_batch_that_lands_with_an_error_is_retried_group_by_group() {
     for version in ALL {
         let world = world();

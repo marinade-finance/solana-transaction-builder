@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use futures_util::{StreamExt, stream};
 use log::{info, warn};
@@ -122,10 +125,7 @@ fn failed(error: impl ToString, logs: Vec<String>) -> GroupStatus {
     }
 }
 
-/// Groups are packed first and each batch is simulated once. A batch that fails simulation has
-/// its groups simulated alone: the failing ones are reported, the rest are packed again.
-/// A batch whose failure is proven on chain goes one group per transaction.
-/// A repeated group id refuses the whole run; the report keeps the order of `groups`.
+/// Packs, simulates and sends `groups` (see README "A run"); the report keeps their order.
 pub async fn run(
     executor: &TransactionExecutor,
     payer: &Pubkey,
@@ -163,9 +163,11 @@ pub async fn run(
         .map(|group| (group.id().to_owned(), group))
         .collect();
     let by_id = &by_id;
+    let claimed = &Claimed::default();
     let mut batch_reports: Vec<(usize, RunReport)> = stream::iter(batches.into_iter().enumerate())
         .map(|(index, batch)| async move {
-            let batch_report = run_batch(executor, payer, batch, by_id, signers, config).await;
+            let batch_report =
+                run_batch(executor, payer, batch, by_id, signers, config, claimed).await;
             (index, batch_report)
         })
         .buffer_unordered(config.max_in_flight.max(1))
@@ -181,6 +183,25 @@ pub async fn run(
 }
 
 type InstructionsKey = Vec<(Pubkey, Vec<(Pubkey, bool, bool)>, Vec<u8>)>;
+
+type Claimed = Mutex<HashMap<Signature, Vec<String>>>;
+
+/// Different batches can compile to one message; one landing must not report both.
+fn claim(
+    claimed: &Claimed,
+    batch: &Batch,
+    attempt: AttemptTransaction,
+) -> anyhow::Result<AttemptTransaction> {
+    let mut claimed = claimed.lock().expect("no panic while claimed is held");
+    let owner = claimed
+        .entry(attempt.transaction.signatures[0])
+        .or_insert_with(|| batch.group_ids.clone());
+    anyhow::ensure!(
+        *owner == batch.group_ids,
+        "the same transaction as the batch {owner:?}"
+    );
+    Ok(attempt)
+}
 
 /// Parallel batches can share a blockhash, and identical instructions then are one transaction.
 fn drop_identical(groups: Vec<Group>, report: &mut RunReport) -> Vec<Group> {
@@ -240,20 +261,39 @@ async fn run_batch(
     by_id: &HashMap<String, Group>,
     signers: &[Arc<dyn Signer + Send + Sync>],
     config: &RunConfig,
+    claimed: &Claimed,
 ) -> RunReport {
     let mut report = RunReport::default();
     match simulate(executor, payer, &batch, config).await {
         Ok(simulation) => {
-            let sent = send(executor, payer, &batch, &simulation, signers, config, true).await;
+            let sent = send(
+                executor,
+                payer,
+                &batch,
+                &simulation,
+                signers,
+                config,
+                true,
+                claimed,
+            )
+            .await;
             if report.apply_sent(&batch.group_ids, sent) {
                 info!("Sending the groups of {:?} one by one", batch.group_ids);
                 for id in &batch.group_ids {
                     let single = Batch::from(&by_id[id]);
                     match simulate(executor, payer, &single, config).await {
                         Ok(simulation) => {
-                            let sent =
-                                send(executor, payer, &single, &simulation, signers, config, true)
-                                    .await;
+                            let sent = send(
+                                executor,
+                                payer,
+                                &single,
+                                &simulation,
+                                signers,
+                                config,
+                                true,
+                                claimed,
+                            )
+                            .await;
                             report.apply_sent(&single.group_ids, sent);
                         }
                         Err(status) => report.set(&single.group_ids, status),
@@ -266,13 +306,24 @@ async fn run_batch(
                 "Batch {:?} failed in simulation ({error}); simulating its groups alone",
                 batch.group_ids
             );
-            isolate(executor, payer, &batch, by_id, signers, config, &mut report).await;
+            isolate(
+                executor,
+                payer,
+                &batch,
+                by_id,
+                signers,
+                config,
+                claimed,
+                &mut report,
+            )
+            .await;
         }
         Err(status) => report.set(&batch.group_ids, status),
     }
     report
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn isolate(
     executor: &TransactionExecutor,
     payer: &Pubkey,
@@ -280,6 +331,7 @@ async fn isolate(
     by_id: &HashMap<String, Group>,
     signers: &[Arc<dyn Signer + Send + Sync>],
     config: &RunConfig,
+    claimed: &Claimed,
     report: &mut RunReport,
 ) {
     let mut passing = Vec::new();
@@ -299,7 +351,10 @@ async fn isolate(
     }
     let send_alone = async |id: &String, report: &mut RunReport| {
         let single = Batch::from(&by_id[id]);
-        let sent = send(executor, payer, &single, &held[id], signers, config, false).await;
+        let sent = send(
+            executor, payer, &single, &held[id], signers, config, false, claimed,
+        )
+        .await;
         report.apply_sent(&single.group_ids, sent);
     };
     for repacked in pack_reporting(payer, &passing, config, report) {
@@ -317,6 +372,7 @@ async fn isolate(
                     signers,
                     config,
                     true,
+                    claimed,
                 )
                 .await;
                 report.apply_sent(&repacked.group_ids, sent)
@@ -383,6 +439,7 @@ async fn simulate(
 }
 
 /// The batch's status, or `split` to send its groups alone; `fresh`: `simulation` is still current.
+#[allow(clippy::too_many_arguments)]
 async fn send(
     executor: &TransactionExecutor,
     payer: &Pubkey,
@@ -391,6 +448,7 @@ async fn send(
     signers: &[Arc<dyn Signer + Send + Sync>],
     config: &RunConfig,
     fresh: bool,
+    claimed: &Claimed,
 ) -> Sent {
     let limits = &config.limits;
     let compute_unit_limit =
@@ -479,7 +537,8 @@ async fn send(
                 config.version,
                 built == 0 && fresh,
             )
-            .await;
+            .await
+            .and_then(|attempt| claim(claimed, batch, attempt));
             Some((attempt, (built + 1, Some(rate))))
         },
     );

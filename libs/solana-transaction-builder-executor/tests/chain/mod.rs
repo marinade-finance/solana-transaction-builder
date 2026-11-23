@@ -225,6 +225,11 @@ impl SendTransactionProvider for Chain {
         {
             return Ok(signature);
         }
+        let mut landed = self.landed.lock().unwrap();
+        // LiteSVM runs a resent signature again; a cluster runs it once.
+        if landed.contains_key(&signature) {
+            return Ok(signature);
+        }
         let poison = *self.poison.lock().unwrap();
         let result = if poison
             .is_some_and(|poison| transaction.message.static_account_keys().contains(&poison))
@@ -238,7 +243,7 @@ impl SendTransactionProvider for Chain {
                 .map(|_| ())
                 .map_err(|failed| failed.err)
         };
-        self.landed.lock().unwrap().insert(signature, result);
+        landed.insert(signature, result);
         Ok(signature)
     }
 }
